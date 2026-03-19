@@ -1,0 +1,9 @@
+requests
+python-dotenv
+pandas
+numpy
+yfinance
+anthropic
+schedule
+python-telegram-bot
+finvizfinance
