@@ -34,9 +34,11 @@
 - technical_score >= 35
 
 ## 信号体系
-两种信号类型：
+四种信号类型：
 1. EP（Episodic Pivot）：催化剂驱动跳空，缺口>10%，放量，突破开盘高点买入
 2. VCP（Volatility Contraction Pattern）：整理收缩后放量突破，回调幅度递减
+3. Bull Flag：旗杆（快速上涨>15%，3-10天）→ 旗面（量缩浅回调3-15%）→ 今日放量突破旗面高点
+4. Weinstein Stage 2：30周均线上翘，突破积累区（S2突破）或回调到30周线支撑（S2回调）
 
 ## 关键设计决策
 - fundamental_filter：Polygon量价初筛 + Finviz逐只查基本面

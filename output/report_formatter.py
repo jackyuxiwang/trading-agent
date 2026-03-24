@@ -35,6 +35,14 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
 
     lines = []
 
+    # ── 大盘风险警告（risk_on=False 时置顶）─────────────────────────────────
+    if not risk_on:
+        lines.append("🔴 大盘风险警告")
+        lines.append(f"VIX: {vix_str} | 原因: {mkt_reason}")
+        lines.append("建议：降低仓位，严格止损，以下信号仅供参考")
+        lines.append("─" * 45)
+        lines.append("")
+
     # ── 标题 ──────────────────────────────────────────────────────────────────
     lines.append(f"📊 每日交易信号报告 — {today}")
     lines.append("")
@@ -65,7 +73,7 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
     lines.append("")
 
     # ── BUY 信号 ──────────────────────────────────────────────────────────────
-    buy_signals   = [s for s in signals if str(s.get("action", "")).upper() == "BUY"]
+    buy_signals   = [s for s in signals if str(s.get("action", "")).upper() in ("BUY", "BUY_RISKY")]
     watch_signals = [s for s in signals if str(s.get("action", "")).upper() == "WATCH"]
 
     if buy_signals:
@@ -93,6 +101,23 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
                 lines.append(f"逻辑：{reason}")
             if risk_warn:
                 lines.append(f"风险：{risk_warn}")
+
+            # 仓位建议
+            rec_shares = s.get("recommended_shares")
+            pos_hkd    = s.get("position_size_hkd")
+            pos_pct    = s.get("position_pct")
+            max_loss   = s.get("max_loss_hkd")
+            rr         = s.get("reward_risk_ratio")
+            if rec_shares and pos_hkd:
+                lines.append(f"💼 仓位建议（基于10万港币，1%风险）")
+                pos_pct_str = f"（占{pos_pct:.1f}%）" if pos_pct else ""
+                rr_str      = f" | 盈亏比: {rr:.1f}:1" if rr else ""
+                loss_str    = f" | 最大亏损: {max_loss:,.0f}港币" if max_loss else ""
+                lines.append(
+                    f"建议买入: {rec_shares}股"
+                    f" | 仓位: {pos_hkd:,.0f}港币{pos_pct_str}"
+                    f"{loss_str}{rr_str}"
+                )
             lines.append("---")
         lines.append("")
 

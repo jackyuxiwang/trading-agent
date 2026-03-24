@@ -1,0 +1,41 @@
+{
+  "cash_hkd": 99712.9615234375,
+  "positions": [
+    {
+      "ticker": "AAOI",
+      "company": "Applied Optoelectronics",
+      "signal_type": "EP",
+      "entry_date": "2026-03-24",
+      "entry_price": 86.0,
+      "shares": 100,
+      "stop_loss": 79.98,
+      "target_1": 103.2,
+      "target_2": 116.1,
+      "current_price": 95.76000213623047,
+      "unrealized_pnl_usd": 976.0,
+      "unrealized_pnl_hkd": 7612.8,
+      "stop_moved_to_cost": false,
+      "partial_sold": false,
+      "status": "open"
+    },
+    {
+      "ticker": "LITE",
+      "company": "Lumentum Holdings",
+      "signal_type": "VCP",
+      "entry_date": "2026-03-24",
+      "entry_price": 62.0,
+      "shares": 34,
+      "stop_loss": 62.0,
+      "target_1": 74.4,
+      "target_2": 83.7,
+      "current_price": 728.9500122070312,
+      "unrealized_pnl_usd": 22676.3,
+      "unrealized_pnl_hkd": 176875.14,
+      "stop_moved_to_cost": true,
+      "partial_sold": true,
+      "status": "open"
+    }
+  ],
+  "closed": [],
+  "created_at": "2026-03-24"
+}
