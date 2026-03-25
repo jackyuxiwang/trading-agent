@@ -6,22 +6,22 @@
 
 ## 技术栈
 - Python 3.9，虚拟环境在 venv/
-- 主要依赖：polygon、finvizfinance、stooq、anthropic、yfinance、python-telegram-bot
+- 主要依赖：polygon、finvizfinance、anthropic、yfinance、requests、tiingo
 
 ## 数据源
 - Polygon.io：全市场每日 OHLCV（Grouped Daily，一次调用）
 - Finviz：基本面初筛（EPS/Sales增速、毛利率）
-- Stooq：个股历史日线（技术指标计算）
+- Tiingo：个股历史日线（技术指标计算，EOD API，1000次/小时）
 - yfinance：大盘环境（VIX/SPY）
 - FMP：备用基本面数据源
 
 ## 当前进度
 - P0 完成：项目骨架、依赖、API keys
 - P1 完成：polygon_client、eodhd_client、market_env_client
-- P2 完成：fundamental_filter（264只）、technical_filter（43只）
-- P3 进行中：signals/ 目录（ep_detector、vcp_scorer、signal_generator）
-- P4 待开始：output/（report_formatter、telegram_alert、log_writer）
-- P5 待开始：main.py 主调度器
+- P2 完成：fundamental_filter、technical_filter
+- P3 完成：signals/（ep_detector、vcp_scorer、bull_flag_detector、weinstein_detector、signal_generator）
+- P4 完成：output/（report_formatter、discord_alert、log_writer）
+- P5 完成：main.py 主调度器
 
 ## 筛选漏斗
 全市场11848只 → Polygon量价初筛2754只 → Finviz基本面精筛264只 → 技术面确认43只 → 信号引擎
@@ -42,11 +42,14 @@
 
 ## 关键设计决策
 - fundamental_filter：Polygon量价初筛 + Finviz逐只查基本面
-- technical_filter：Stooq拉历史数据，避免Polygon免费档限速
-- 信号引擎：Claude API（claude-sonnet-4-6）综合判断
-- 告警：Telegram Bot，每天收盘后推送
-- 缓存目录：data/cache/，当天缓存不重复请求
+- technical_filter：Tiingo拉历史数据（替代Stooq，无每日限额问题）
+- EP detector：复用 technical_filter 缓存的 last_open/prev_close，零额外API请求
+- VCP/BullFlag/Weinstein：各自调用 Tiingo，结果按日期缓存到 data/cache/
+- 信号引擎：Claude API（claude-sonnet-4-6）综合判断，支持 BUY/BUY_RISKY/WATCH/SKIP
+- 告警：Discord Webhook，每天收盘后推送（替代 Telegram）
+- 缓存目录：data/cache/，当天缓存不重复请求（tiingo_{TICKER}_{date}.json 格式）
+- risk_on=False 时：不退出，继续扫描，所有信号标注为 BUY_RISKY
 
 ## API Keys（在 .env 文件中）
 ANTHROPIC_API_KEY, POLYGON_API_KEY, EODHD_API_KEY, FMP_API_KEY,
-TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+TIINGO_API_KEY, DISCORD_WEBHOOK_URL

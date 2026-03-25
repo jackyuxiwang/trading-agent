@@ -10,62 +10,28 @@ VCP 触发条件（同时满足）：
   - vcp_score >= 45
 """
 
-import io
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-import requests
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-STOOQ_DELAY = 0.05  # 秒，请求间隔
+from data.tiingo_client import get_history as tiingo_get_history
 
 # ── VCP 触发阈值 ───────────────────────────────────────────────────────────────
 VCP_MIN_SCORE         = 45
 VCP_MAX_DRAWDOWN      = 30.0   # 最大允许回撤（%）
 VCP_MIN_GAIN_60D      = 10.0   # 需要有涨幅基础
 
-# ── Stooq 数据获取 ────────────────────────────────────────────────────────────
+# ── 数据获取（Tiingo） ────────────────────────────────────────────────────────
 
 def _get_history_stooq(ticker: str, days: int = 60) -> pd.DataFrame:
-    """
-    从 Stooq 获取最近 N 根日线。
+    """保留原函数名，内部改用 Tiingo。"""
+    return tiingo_get_history(ticker, days=days)
 
-    Returns:
-        DataFrame，列: date, open, high, low, close, volume（升序）
-        失败时返回空 DataFrame
-    """
-    url = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&i=d"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        if "Exceeded the daily hits limit" in resp.text:
-            print(f"  [warn] Stooq 达到每日请求上限，请明天重新运行")
-            return pd.DataFrame()
-        df = pd.read_csv(io.StringIO(resp.text))
-    except Exception:
-        return pd.DataFrame()
-
-    if df.empty or len(df) < 20:
-        return pd.DataFrame()
-
-    df.columns = [c.lower() for c in df.columns]
-    required = {"date", "open", "high", "low", "close", "volume"}
-    if not required.issubset(set(df.columns)):
-        return pd.DataFrame()
-
-    for col in ("open", "high", "low", "close"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
-    df = df[df["close"] > 0].copy()
-
-    if len(df) < 20:
-        return pd.DataFrame()
-
-    return df.sort_values("date").tail(days).reset_index(drop=True)
 
 
 # ── VCP 指标计算 ───────────────────────────────────────────────────────────────

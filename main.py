@@ -66,8 +66,6 @@ def run_daily_scan(date: str = None) -> dict:
         "stage3_count":    0,
         "ep_signals":      0,
         "vcp_signals":     0,
-        "bf_signals":      0,
-        "ws_signals":      0,
         "buy_signals":     0,
         "risk_on":         True,
         "vix":             None,
@@ -80,8 +78,6 @@ def run_daily_scan(date: str = None) -> dict:
     tech_candidates  = []
     ep_signals_list  = []
     vcp_signals_list = []
-    bf_signals_list  = []
-    ws_signals_list  = []
     buy_signals      = []
 
     # ── Step 1: 交易日检查 ────────────────────────────────────────────────────
@@ -112,9 +108,13 @@ def run_daily_scan(date: str = None) -> dict:
         print(f"  SPY趋势  : {market_env.get('spy_trend')}")
         print(f"  评估     : {market_env.get('reason', '')}")
 
-        if not market_env.get("risk_on", True):
-            print(f"\n  ⚠️  大盘风险偏好关闭，继续扫描但降低仓位建议")
+        if not market_env.get("risk_on", True) and not is_backtest:
+            print(f"\n  ⚠️  大盘风险偏好关闭，今日不扫描")
             print(f"  原因: {market_env.get('reason', '')}")
+            summary["runtime_minutes"] = (time.time() - scan_start) / 60
+            _write_summary(summary, [], market_env)
+            _send_risk_alert(market_env, today_label)
+            return summary
     except Exception as e:
         print(f"  [warn] 大盘环境获取失败: {e}，使用默认值继续")
     _done(t0, "大盘环境")
@@ -170,31 +170,14 @@ def run_daily_scan(date: str = None) -> dict:
         print(f"  VCP 信号: {len(vcp_signals_list)} 个")
     except Exception as e:
         print(f"  [error] VCP 评分失败: {e}")
-
-    try:
-        from signals.bull_flag_detector import detect as bf_detect
-        bf_signals_list = bf_detect(tech_candidates)
-        summary["bf_signals"] = len(bf_signals_list)
-        print(f"  Bull Flag 信号: {len(bf_signals_list)} 个")
-    except Exception as e:
-        print(f"  [error] Bull Flag 检测失败: {e}")
-
-    try:
-        from signals.weinstein_detector import detect as ws_detect
-        ws_signals_list = ws_detect(tech_candidates)
-        summary["ws_signals"] = len(ws_signals_list)
-        print(f"  Weinstein 信号: {len(ws_signals_list)} 个")
-    except Exception as e:
-        print(f"  [error] Weinstein 检测失败: {e}")
     _done(t0, "信号检测")
 
     # ── Step 6: Claude 信号生成 ───────────────────────────────────────────────
     t0 = _step("Step 6: Claude 综合分析")
     try:
         from signals.signal_generator import generate
-        all_signals = ep_signals_list + vcp_signals_list + bf_signals_list + ws_signals_list
-        buy_signals = generate(ep_signals_list, vcp_signals_list, market_env,
-                               bf_signals=bf_signals_list, ws_signals=ws_signals_list)
+        all_signals = ep_signals_list + vcp_signals_list   # WATCH/SKIP 也保留，供报告使用
+        buy_signals = generate(ep_signals_list, vcp_signals_list, market_env)
         summary["buy_signals"] = len(buy_signals)
         print(f"  最终 BUY 信号: {len(buy_signals)} 个")
     except Exception as e:
@@ -215,34 +198,6 @@ def run_daily_scan(date: str = None) -> dict:
 
     _write_summary(summary, buy_signals, market_env)
 
-    # ── 更新虚拟账户持仓 ──────────────────────────────────────────────────────
-    try:
-        from portfolio.virtual_account import update_positions, get_account_summary
-        update_positions()
-        acct = get_account_summary()
-        acct_block = (
-            f"\n💼 账户概况\n"
-            f"总资产: {acct['total_assets_hkd']:,.0f}港币"
-            f" | 现金: {acct['cash_hkd']:,.0f}港币"
-            f" | 持仓: {acct['holding_value_hkd']:,.0f}港币\n"
-            f"总盈亏: {acct['total_pnl_hkd']:+,.0f}港币 ({acct['total_pnl_pct']:+.2f}%)"
-            f" | 持仓数: {acct['open_count']}"
-        )
-        report_text = (report_text or "") + acct_block
-        print(acct_block)
-    except Exception as e:
-        print(f"  [warn] 虚拟账户更新失败: {e}")
-
-    # ── 周五生成周报 ──────────────────────────────────────────────────────────
-    if datetime.today().weekday() == 4:   # 4 = Friday
-        try:
-            from portfolio.weekly_report import generate_weekly_report
-            weekly = generate_weekly_report()
-            print("\n" + weekly)
-            report_text = (report_text or "") + "\n\n" + weekly
-        except Exception as e:
-            print(f"  [warn] 周报生成失败: {e}")
-
     try:
         from output.discord_alert import send_report
         if report_text:
@@ -260,14 +215,36 @@ def run_daily_scan(date: str = None) -> dict:
     print(f"  扫描完成  总耗时: {total_elapsed/60:.1f} 分钟")
     print(f"  漏斗: 全市场 → {summary['stage2_count']} (基本面)"
           f" → {summary['stage3_count']} (技术面)"
-          f" → {summary['ep_signals']} EP"
-          f" + {summary['vcp_signals']} VCP"
-          f" + {summary['bf_signals']} BullFlag"
-          f" + {summary['ws_signals']} Weinstein"
+          f" → {summary['ep_signals']} EP + {summary['vcp_signals']} VCP"
           f" → {summary['buy_signals']} BUY")
     print(f"{'#' * 60}\n")
 
     return summary
+
+
+def _send_risk_alert(market_env: dict, date: str) -> None:
+    """推送大盘风险提醒到 Discord，失败不抛异常。"""
+    vix       = market_env.get("vix")
+    spy_trend = market_env.get("spy_trend", "N/A")
+    reason    = market_env.get("reason", "")
+    vix_str   = f"{vix:.1f}" if isinstance(vix, (int, float)) else "N/A"
+
+    report = (
+        f"⚠️ 今日市场风险提醒 — {date}\n"
+        f"\n"
+        f"🔴 大盘环境：不适合做多\n"
+        f"VIX: {vix_str} | SPY趋势: {spy_trend}\n"
+        f"原因: {reason}\n"
+        f"\n"
+        f"今日建议：观望，不开新仓\n"
+        f"系统已自动跳过今日扫描"
+    )
+    print(report)
+    try:
+        from output.discord_alert import send_report
+        send_report(report)
+    except Exception as e:
+        print(f"  [warn] Discord 风险提醒推送失败: {e}")
 
 
 def _write_summary(summary: dict, buy_signals: list, market_env: dict) -> None:

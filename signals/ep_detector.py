@@ -10,18 +10,16 @@ EP 触发条件（同时满足）：
   - today_close > today_open（收盘强于开盘）
 """
 
-import io
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-import requests
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-STOOQ_DELAY = 0.05  # 秒，请求间隔
+from data.tiingo_client import get_history as tiingo_get_history
 
 # ── EP 触发阈值 ────────────────────────────────────────────────────────────────
 EP_MIN_GAP_PCT      = 5.0   # 最小跳空幅度（%）
@@ -29,34 +27,11 @@ EP_MIN_VOLUME_RATIO = 2.0   # 最小相对成交量
 # today_close > today_open（硬性条件，无阈值）
 
 
-# ── Stooq 数据获取 ────────────────────────────────────────────────────────────
+# ── 数据获取（Tiingo） ────────────────────────────────────────────────────────
 
 def _get_recent_stooq(ticker: str, days: int = 5) -> pd.DataFrame:
-    """
-    从 Stooq 获取最近 N 根日线（用于计算跳空）。
-
-    Returns:
-        DataFrame，列: date, open, high, low, close, volume（升序）
-        失败时返回空 DataFrame
-    """
-    url = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&i=d"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        if "Exceeded the daily hits limit" in resp.text:
-            print(f"  [warn] Stooq 达到每日请求上限，EP 检测将跳过 Stooq 回退逻辑")
-            return pd.DataFrame()
-        df = pd.read_csv(io.StringIO(resp.text))
-    except Exception:
-        return pd.DataFrame()
-
-    if df.empty or len(df) < 2:
-        return pd.DataFrame()
-
-    df.columns = [c.lower() for c in df.columns]
-    required = {"date", "open", "high", "low", "close", "volume"}
-    if not required.issubset(set(df.columns)):
-        return pd.DataFrame()
+    """保留原函数名，内部改用 Tiingo。"""
+    return tiingo_get_history(ticker, days=days)
 
     df["open"]   = pd.to_numeric(df["open"],   errors="coerce")
     df["high"]   = pd.to_numeric(df["high"],   errors="coerce")

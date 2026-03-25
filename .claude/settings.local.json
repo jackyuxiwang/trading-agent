@@ -21,15 +21,7 @@
       "Bash(rm -f data/cache/fmp_fundamentals_NVDA_* data/cache/fmp_fundamentals_COIN_* data/cache/fmp_fundamentals_AAPL_* data/cache/fmp_fundamentals_MSFT_* data/cache/fmp_fundamentals_META_*)",
       "Bash(ls data/cache/fmp_*)",
       "Bash(xargs rm:*)",
-      "Bash(source venv/bin/activate)",
-      "Bash(python main.py)",
-      "Bash(python -c \":*)",
-      "Bash(python portfolio/virtual_account.py)",
-      "Bash(python portfolio/weekly_report.py)",
-      "Bash(claude --version)",
-      "Bash(python main.py --test)",
-      "Bash(python signals/bull_flag_detector.py)",
-      "Bash(python signals/weinstein_detector.py)"
+      "Bash(ls:*)"
     ]
   }
 }

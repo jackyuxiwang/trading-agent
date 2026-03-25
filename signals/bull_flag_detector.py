@@ -15,19 +15,18 @@ Bull Flag 触发条件（同时满足）：
   - bf_score >= 50
 """
 
-import io
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-import requests
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-STOOQ_DELAY  = 0.05   # 秒，请求间隔
-HISTORY_DAYS = 60     # Stooq 拉取天数（保证有足够历史）
+from data.tiingo_client import get_history as tiingo_get_history
+
+HISTORY_DAYS = 60     # 拉取天数（保证有足够历史）
 FLAG_DAYS    = 5      # 旗面识别天数（今日前 N 天）
 POLE_WINDOW  = 20     # 旗杆搜索窗口（旗面之前 N 天）
 
@@ -44,34 +43,11 @@ BF_MAX_FLAG_VOL_RATIO = 0.70   # 旗面均量 / 旗杆均量（必须收缩）
 BF_BREAKOUT_VOL_RATIO = 1.5    # 突破日量 / 20日均量
 
 
-# ── Stooq 数据获取 ────────────────────────────────────────────────────────────
+# ── 数据获取（Tiingo） ────────────────────────────────────────────────────────
 
 def _get_history_stooq(ticker: str, days: int = HISTORY_DAYS) -> pd.DataFrame:
-    """从 Stooq 获取最近 N 根日线，返回升序 DataFrame；失败返回空 DataFrame。"""
-    url = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&i=d"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        if "Exceeded the daily hits limit" in resp.text:
-            print(f"  [warn] Stooq 达到每日请求上限，Bull Flag 检测暂停")
-            return pd.DataFrame()
-        df = pd.read_csv(io.StringIO(resp.text))
-    except Exception:
-        return pd.DataFrame()
-
-    if df.empty or len(df) < FLAG_DAYS + BF_MIN_POLE_DAYS + 5:
-        return pd.DataFrame()
-
-    df.columns = [c.lower() for c in df.columns]
-    if not {"date", "open", "high", "low", "close", "volume"}.issubset(df.columns):
-        return pd.DataFrame()
-
-    for col in ("open", "high", "low", "close"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
-    df = df[df["close"] > 0].copy()
-
-    return df.sort_values("date").tail(days).reset_index(drop=True)
+    """保留原函数名，内部改用 Tiingo。"""
+    return tiingo_get_history(ticker, days=days)
 
 
 # ── Bull Flag 形态检测 ────────────────────────────────────────────────────────

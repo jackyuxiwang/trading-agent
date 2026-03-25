@@ -1,10 +1,10 @@
 """
-technical_filter.py — 技术面筛选模块（Stooq 数据源）
+technical_filter.py — 技术面筛选模块（Tiingo 数据源）
 
 对基本面候选股做技术面二次过滤，保留处于均线多头排列、
 有近期动量且波动收缩的股票。
 
-数据源: https://stooq.com/q/d/l/?s={ticker}.us&i=d
+数据源: Tiingo EOD API（via data/tiingo_client.py）
 
 硬性条件: stage2_check（close > MA20 且 close > MA50）
 评分条件: 动量 + 波动收缩 + 成交量放大，总分 >= 35 进入最终候选
@@ -17,19 +17,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import io
-
 import pandas as pd
-import requests
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from data.tiingo_client import get_history as tiingo_get_history
 
 CACHE_DIR = Path(__file__).parent.parent / "data" / "cache"
 
 # ── 技术面阈值 ────────────────────────────────────────────────────────────────
 CONSOLIDATION_RATIO = 0.85   # atr_10 / atr_30 < 此值视为收缩
 MIN_TECH_SCORE      = 35     # 最低技术得分
-STOOQ_DELAY         = 0.05   # 秒，请求间隔
 
 # ── 评分权重 ──────────────────────────────────────────────────────────────────
 SCORE_STAGE2          = 25
@@ -74,53 +72,11 @@ def _save_cache(name: str, data: list) -> None:
     print(f"  [cache] 已写入缓存: {path.name}")
 
 
-# ── Stooq 数据获取 ────────────────────────────────────────────────────────────
+# ── 数据获取（Tiingo） ────────────────────────────────────────────────────────
 
 def get_history_stooq(ticker: str, days: int = 60) -> pd.DataFrame:
-    """
-    从 Stooq 获取股票历史日线数据。
-
-    Args:
-        ticker: 股票代码，如 "AAPL"（自动转为小写拼接 .us 后缀）
-        days:   返回最近 N 个交易日的数据
-
-    Returns:
-        DataFrame，列: date, open, high, low, close, volume（升序）
-        获取失败或无数据时返回空 DataFrame
-    """
-    url = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&i=d"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        if "Exceeded the daily hits limit" in resp.text:
-            print(f"  [warn] Stooq 达到每日请求上限，请明天重新运行")
-            return pd.DataFrame()
-        df = pd.read_csv(io.StringIO(resp.text))
-    except Exception:
-        return pd.DataFrame()
-
-    if df.empty or len(df) < 2:
-        return pd.DataFrame()
-
-    # 列名统一小写
-    df.columns = [c.lower() for c in df.columns]
-
-    # 确保有必要的列
-    required = {"date", "open", "high", "low", "close", "volume"}
-    if not required.issubset(set(df.columns)):
-        return pd.DataFrame()
-
-    # 过滤掉 Stooq 偶尔返回的无效占位行（close 为 0 或非数字）
-    df["close"]  = pd.to_numeric(df["close"],  errors="coerce")
-    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
-    df = df[df["close"] > 0].copy()
-
-    if df.empty:
-        return pd.DataFrame()
-
-    # 按日期升序，取最近 days 根
-    df = df.sort_values("date").tail(days).reset_index(drop=True)
-    return df
+    """保留原函数名以兼容外部调用，内部改用 Tiingo。"""
+    return tiingo_get_history(ticker, days=days)
 
 
 # ── 技术指标计算 ──────────────────────────────────────────────────────────────
@@ -246,7 +202,7 @@ def run(candidates: list) -> list:
     t_start = time.time()
 
     print(f"[technical_filter] 开始技术面过滤，共 {total} 只候选")
-    print(f"  数据源: Stooq  延迟: {STOOQ_DELAY}s/只")
+    print(f"  数据源: Tiingo EOD")
     print(f"  硬性条件: Stage2（close > MA20 且 close > MA50）")
     print(f"  最低得分: {MIN_TECH_SCORE}")
 
@@ -267,19 +223,16 @@ def run(candidates: list) -> list:
         df = get_history_stooq(ticker, days=60)
         if df.empty:
             skipped += 1
-            time.sleep(STOOQ_DELAY)
             continue
 
         tech = _compute_technicals(df)
 
         # 硬性条件
         if not tech["stage2_check"]:
-            time.sleep(STOOQ_DELAY)
             continue
 
         # 评分门槛
         if tech["technical_score"] < MIN_TECH_SCORE:
-            time.sleep(STOOQ_DELAY)
             continue
 
         # 保存最近2天 OHLCV，供 ep_detector 复用（避免重复请求 Stooq）
@@ -298,7 +251,6 @@ def run(candidates: list) -> list:
             }
 
         passed.append({**stock, **tech, **last2})
-        time.sleep(STOOQ_DELAY)
 
     elapsed_total = time.time() - t_start
     passed.sort(key=lambda x: x.get("technical_score", 0), reverse=True)
