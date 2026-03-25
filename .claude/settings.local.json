@@ -21,7 +21,11 @@
       "Bash(rm -f data/cache/fmp_fundamentals_NVDA_* data/cache/fmp_fundamentals_COIN_* data/cache/fmp_fundamentals_AAPL_* data/cache/fmp_fundamentals_MSFT_* data/cache/fmp_fundamentals_META_*)",
       "Bash(ls data/cache/fmp_*)",
       "Bash(xargs rm:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(python main.py)",
+      "Bash(python -c \":*)",
+      "Bash(python data/tiingo_client.py)",
+      "Bash(python -c \"from signals.signal_generator import generate; print\\(''OK''\\)\")"
     ]
   }
 }

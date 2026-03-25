@@ -55,17 +55,19 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
     lines.append("")
 
     # ── 扫描统计 ──────────────────────────────────────────────────────────────
+    buy_signals   = [s for s in signals if str(s.get("action", "")).upper() in ("BUY", "BUY_RISKY")]
+    watch_signals = [s for s in signals if str(s.get("action", "")).upper() == "WATCH"]
+
     total_mkt  = summary.get("total_market", "?")
     stage2_cnt = summary.get("stage2_count", "?")
     stage3_cnt = summary.get("stage3_count", "?")
-    sig_cnt    = summary.get("buy_signals",  "?")
 
     lines.append("📈 扫描统计")
     lines.append(
         f"全市场扫描: {total_mkt}只 → "
         f"基本面筛选: {stage2_cnt}只 → "
         f"技术确认: {stage3_cnt}只 → "
-        f"信号: {sig_cnt}只"
+        f"BUY信号: {len(buy_signals)}只 | WATCH: {len(watch_signals)}只"
     )
     runtime = summary.get("runtime_minutes")
     if runtime is not None:
@@ -73,9 +75,6 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
     lines.append("")
 
     # ── BUY 信号 ──────────────────────────────────────────────────────────────
-    buy_signals   = [s for s in signals if str(s.get("action", "")).upper() in ("BUY", "BUY_RISKY")]
-    watch_signals = [s for s in signals if str(s.get("action", "")).upper() == "WATCH"]
-
     if buy_signals:
         lines.append(f"🔔 买入信号（共 {len(buy_signals)} 个）")
         lines.append("")
@@ -92,15 +91,45 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
             reason     = s.get("reason", "")
             risk_warn  = s.get("risk_warning", "")
 
-            lines.append(f"🔥 {ticker} — {stype} 信号（置信度 {conf}/10）")
-            if company or sector:
-                lines.append(f"公司：{company}（{sector}）")
-            lines.append(f"入场区间：{entry}")
-            lines.append(f"止损：{stop} | 目标一：{t1} | 目标二：{t2}")
-            if reason:
-                lines.append(f"逻辑：{reason}")
-            if risk_warn:
-                lines.append(f"风险：{risk_warn}")
+            if stype == "VCP_CHEAT_ENTRY":
+                orig_breakout    = s.get("original_breakout", "N/A")
+                stop_loss_pct    = s.get("stop_loss_pct", "")
+                stop_pct_str     = f"（止损幅度 {stop_loss_pct:.1f}%）" if isinstance(stop_loss_pct, (int, float)) else ""
+                cur_price        = s.get("current_price")
+                cur_price_str    = f"${cur_price:.2f}" if isinstance(cur_price, (int, float)) else "N/A"
+                distance         = s.get("distance_to_cheat")
+                distance_str     = f"{distance:.1f}%" if isinstance(distance, (int, float)) else "N/A"
+                slope_5d         = s.get("slope_5d")
+                slope_str        = f"{slope_5d:+.1f}%" if isinstance(slope_5d, (int, float)) else "N/A"
+                feasibility      = s.get("cheat_entry_feasibility", "N/A")
+                ce_score         = s.get("cheat_entry_score", "N/A")
+                vol_trend        = s.get("vol_trend", "N/A")
+                ma_support       = s.get("ma_support", "N/A")
+
+                lines.append(f"🎯 {ticker} — VCP 低吸策略（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"📍 当前价：{cur_price_str} | 距低吸区：{distance_str}")
+                lines.append(f"⏳ 低吸买入区：{entry}")
+                lines.append(f"📊 低吸可行性：{feasibility}（{ce_score}/100）")
+                lines.append(f"近5日趋势：{slope_str} | 量能：{vol_trend}")
+                lines.append(f"均线支撑：{ma_support}")
+                lines.append(f"止损：{stop}{stop_pct_str}")
+                lines.append(f"突破目标：{orig_breakout} | 目标一：{t1} | 目标二：{t2}")
+                if reason:
+                    lines.append(f"💬 {reason}")
+                if risk_warn:
+                    lines.append(f"⚠️ {risk_warn}")
+            else:
+                lines.append(f"🔥 {ticker} — {stype} 信号（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"入场区间：{entry}")
+                lines.append(f"止损：{stop} | 目标一：{t1} | 目标二：{t2}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
+                if risk_warn:
+                    lines.append(f"风险：{risk_warn}")
 
             # 仓位建议
             rec_shares = s.get("recommended_shares")
@@ -121,17 +150,70 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
             lines.append("---")
         lines.append("")
 
-    else:
-        lines.append("今日无符合条件的买入信号，继续观察以下关注股：")
-        lines.append("")
-        if watch_signals:
-            for s in watch_signals[:5]:
-                ticker = s.get("ticker", "")
-                stype  = s.get("signal_type", "")
-                entry  = s.get("entry_zone", "N/A")
-                lines.append(f"  👀 {ticker} ({stype}) — 关注入场区间: {entry}")
+    # ── WATCH 信号 ────────────────────────────────────────────────────────────
+    if watch_signals:
+        if not buy_signals:
+            lines.append("今日无买入信号，以下为关注标的：")
+            lines.append("")
         else:
-            lines.append("  （暂无关注股）")
+            lines.append(f"👀 关注标的（共 {len(watch_signals)} 个）")
+            lines.append("")
+
+        for s in watch_signals:
+            ticker    = s.get("ticker", "")
+            stype     = s.get("signal_type", "")
+            conf      = s.get("confidence", "?")
+            company   = s.get("company", "")
+            sector    = s.get("sector", "")
+            entry     = s.get("entry_zone", "N/A")
+            stop      = s.get("stop_loss", "N/A")
+            t1        = s.get("target_1", "N/A")
+            reason    = s.get("reason", "")
+
+            if stype == "VCP_CHEAT_ENTRY":
+                orig_breakout = s.get("original_breakout", "N/A")
+                stop_loss_pct = s.get("stop_loss_pct", "")
+                stop_pct_str  = f"（止损幅度 {stop_loss_pct:.1f}%）" if isinstance(stop_loss_pct, (int, float)) else ""
+                cur_price     = s.get("current_price")
+                cur_price_str = f"${cur_price:.2f}" if isinstance(cur_price, (int, float)) else "N/A"
+                distance      = s.get("distance_to_cheat")
+                distance_str  = f"{distance:.1f}%" if isinstance(distance, (int, float)) else "N/A"
+                slope_5d      = s.get("slope_5d")
+                slope_str     = f"{slope_5d:+.1f}%" if isinstance(slope_5d, (int, float)) else "N/A"
+                feasibility   = s.get("cheat_entry_feasibility", "N/A")
+                ce_score      = s.get("cheat_entry_score", "N/A")
+                vol_trend     = s.get("vol_trend", "N/A")
+                ma_support    = s.get("ma_support", "N/A")
+
+                lines.append(f"🎯 {ticker} — VCP 低吸关注（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"📍 当前价：{cur_price_str} | 距低吸区：{distance_str}")
+                lines.append(f"⏳ 低吸买入区：{entry}")
+                lines.append(f"📊 低吸可行性：{feasibility}（{ce_score}/100）")
+                lines.append(f"近5日趋势：{slope_str} | 量能：{vol_trend}")
+                lines.append(f"均线支撑：{ma_support}")
+                lines.append(f"止损参考：{stop}{stop_pct_str}")
+                lines.append(f"突破目标：{orig_breakout} | 目标一：{t1}")
+            else:
+                lines.append(f"👀 {ticker} — {stype} 关注（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"关注区间：{entry}")
+                lines.append(f"止损参考：{stop} | 目标一：{t1}")
+            if reason:
+                lines.append(f"💬 {reason}" if stype == "VCP_CHEAT_ENTRY" else f"逻辑：{reason}")
+            lines.append("⚠️ 大盘风险较高，建议等待更好入场时机")
+            lines.append("---")
+        lines.append("")
+
+        # 全部为 WATCH 时的总结提示
+        if not buy_signals:
+            lines.append(f"今日大盘风险偏高（VIX={vix_str}），以上均为观察标的，建议等待大盘稳定后入场")
+            lines.append("")
+
+    elif not buy_signals:
+        lines.append("今日无符合条件的买入或关注信号")
         lines.append("")
 
     return "\n".join(lines)

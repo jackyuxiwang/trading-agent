@@ -246,7 +246,6 @@ def detect(candidates: list) -> list:
 
         df = _get_history_stooq(ticker, days=HISTORY_DAYS)
         stooq_requests += 1
-        time.sleep(STOOQ_DELAY)
 
         if df.empty:
             skipped += 1

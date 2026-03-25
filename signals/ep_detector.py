@@ -208,17 +208,14 @@ def detect(candidates: list) -> list:
             df = _get_recent_stooq(ticker, days=5)
             if df.empty:
                 skipped += 1
-                time.sleep(STOOQ_DELAY)
                 continue
             metrics = _compute_ep_metrics(df, vol_ma20)
-            time.sleep(STOOQ_DELAY)
 
         if metrics is None:
             skipped += 1
             continue
 
         if not _is_ep(metrics):
-            time.sleep(STOOQ_DELAY)
             continue
 
         ep_scr = _ep_score(metrics, tech_score)
@@ -234,7 +231,6 @@ def detect(candidates: list) -> list:
             "stop_loss":     f"{metrics['today_low'] * 0.99:.2f}",
         }
         signals.append(signal)
-        time.sleep(STOOQ_DELAY)
 
     signals.sort(key=lambda x: x.get("ep_score", 0), reverse=True)
 

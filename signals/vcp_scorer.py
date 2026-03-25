@@ -148,6 +148,110 @@ def _is_vcp(metrics: dict, vcp_scr: int, stock: dict) -> bool:
     return True
 
 
+def calculate_cheat_entry(df: pd.DataFrame, current_price: float,
+                          cheat_low: float, cheat_high: float) -> dict:
+    """
+    分析低吸策略的可行性。
+
+    Args:
+        df:            60天历史 OHLCV DataFrame（升序）
+        current_price: 当前价格
+        cheat_low:     低吸区间下限
+        cheat_high:    低吸区间上限
+
+    Returns:
+        包含可行性指标的 dict
+    """
+    result = {
+        "distance_to_cheat":      None,
+        "slope_5d":               None,
+        "vol_shrinking_3d":       False,
+        "ma10_in_cheat_zone":     False,
+        "ma20_in_cheat_zone":     False,
+        "cheat_entry_score":      0,
+        "cheat_entry_feasibility": "低",
+        "vol_trend":              "N/A",
+        "ma_support":             "无支撑",
+    }
+
+    n = len(df)
+    if n < 5 or current_price <= 0 or cheat_low <= 0:
+        return result
+
+    close  = df["close"]
+    volume = df["volume"]
+
+    # a) 价格距低吸区的距离
+    distance = (current_price - cheat_low) / current_price * 100
+    result["distance_to_cheat"] = round(distance, 1)
+
+    # b) 近5日价格趋势
+    if n >= 5:
+        p5 = float(close.iloc[-5])
+        p1 = float(close.iloc[-1])
+        slope_5d = (p1 - p5) / p5 * 100 if p5 > 0 else 0
+        result["slope_5d"] = round(slope_5d, 2)
+
+    # c) 近3日成交量是否收缩
+    if n >= 3:
+        vol_shrinking = float(volume.iloc[-1]) < float(volume.iloc[-3])
+        result["vol_shrinking_3d"] = vol_shrinking
+        result["vol_trend"] = "量缩" if vol_shrinking else "量增"
+
+    # d) 均线支撑
+    if n >= 20:
+        ma20 = float(close.tail(20).mean())
+        result["ma20_in_cheat_zone"] = cheat_low <= ma20 <= cheat_high
+    if n >= 10:
+        ma10 = float(close.tail(10).mean())
+        result["ma10_in_cheat_zone"] = cheat_low <= ma10 <= cheat_high
+
+    if result["ma20_in_cheat_zone"]:
+        result["ma_support"] = "MA20强支撑"
+    elif result["ma10_in_cheat_zone"]:
+        result["ma_support"] = "MA10中等支撑"
+    else:
+        result["ma_support"] = "无均线支撑"
+
+    # ── 综合评分 ──────────────────────────────────────────────────────────────
+    score = 0
+
+    d = result["distance_to_cheat"]
+    if d is not None:
+        if d < 5:
+            score += 30
+        elif d < 10:
+            score += 20
+        elif d < 20:
+            score += 10
+
+    s5 = result["slope_5d"]
+    if s5 is not None:
+        if s5 < -1:
+            score += 25
+        elif s5 < 0:
+            score += 15
+
+    if result["vol_shrinking_3d"]:
+        score += 20
+
+    if result["ma20_in_cheat_zone"]:
+        score += 25
+    elif result["ma10_in_cheat_zone"]:
+        score += 15
+
+    result["cheat_entry_score"] = score
+
+    if score >= 60:
+        result["cheat_entry_feasibility"] = "高"
+    elif score >= 40:
+        result["cheat_entry_feasibility"] = "中"
+    else:
+        result["cheat_entry_feasibility"] = "低"
+
+    return result
+
+
 # ── 公开接口 ──────────────────────────────────────────────────────────────────
 
 def score(candidates: list) -> list:
@@ -187,7 +291,6 @@ def score(candidates: list) -> list:
             # 缓存数据不足，从 Stooq 重新拉取
             df = _get_history_stooq(ticker, days=60)
             stooq_requests += 1
-            time.sleep(STOOQ_DELAY)
             if df.empty:
                 skipped += 1
                 continue
@@ -201,21 +304,70 @@ def score(candidates: list) -> list:
         current_price = float(stock.get("last_close") or df["close"].iloc[-1])
         pivot         = metrics["pivot_point"]
         min_low_20d   = metrics["min_low_20d"]
+        stop_price    = round(min_low_20d * 0.98, 2)
 
-        signal = {
-            **stock,
-            "signal_type":           "VCP",
-            "vcp_score":             vcp_scr,
-            "volatility_contraction": metrics["volatility_contraction"],
-            "volume_contraction":     metrics["volume_contraction"],
-            "drawdown_from_high":     metrics["drawdown_from_high"],
-            "seg1_vol":              metrics["seg1_vol"],
-            "seg2_vol":              metrics["seg2_vol"],
-            "seg3_vol":              metrics["seg3_vol"],
-            "pivot_point":           pivot,
-            "entry_zone":            f"{current_price * 0.99:.2f}–{pivot:.2f}",
-            "stop_loss":             f"{min_low_20d * 0.98:.2f}",
-        }
+        # ── 止损幅度检查 & cheat entry 逻辑 ──────────────────────────────────
+        stop_loss_pct = (current_price - stop_price) / current_price * 100 if current_price > 0 else 999
+
+        if stop_loss_pct > 10:
+            # 低吸入场点：当前价和整理低点的中间位
+            cheat_low  = round((current_price + min_low_20d) / 2, 2)
+            cheat_high = round(cheat_low * 1.03, 2)
+            new_stop_pct = (cheat_low - stop_price) / cheat_low * 100 if cheat_low > 0 else 999
+
+            if new_stop_pct > 12:
+                continue  # 低吸后止损仍过大，跳过
+
+            cheat_info = calculate_cheat_entry(df, current_price, cheat_low, cheat_high)
+
+            signal = {
+                **stock,
+                "signal_type":            "VCP_CHEAT_ENTRY",
+                "vcp_score":              vcp_scr,
+                "volatility_contraction": metrics["volatility_contraction"],
+                "volume_contraction":     metrics["volume_contraction"],
+                "drawdown_from_high":     metrics["drawdown_from_high"],
+                "seg1_vol":               metrics["seg1_vol"],
+                "seg2_vol":               metrics["seg2_vol"],
+                "seg3_vol":               metrics["seg3_vol"],
+                "pivot_point":            pivot,
+                "current_price":          current_price,
+                "cheat_entry_low":        cheat_low,
+                "cheat_entry_high":       cheat_high,
+                "entry_zone":             f"{cheat_low:.2f}–{cheat_high:.2f}",
+                "stop_loss":              f"{stop_price:.2f}",
+                "stop_loss_pct":          round(new_stop_pct, 1),
+                "cheat_entry":            True,
+                "wait_for_pullback":      True,
+                "original_breakout":      pivot,
+                # 低吸可行性分析
+                "distance_to_cheat":      cheat_info["distance_to_cheat"],
+                "slope_5d":               cheat_info["slope_5d"],
+                "vol_trend":              cheat_info["vol_trend"],
+                "ma_support":             cheat_info["ma_support"],
+                "cheat_entry_score":      cheat_info["cheat_entry_score"],
+                "cheat_entry_feasibility": cheat_info["cheat_entry_feasibility"],
+            }
+        else:
+            signal = {
+                **stock,
+                "signal_type":            "VCP",
+                "vcp_score":              vcp_scr,
+                "volatility_contraction": metrics["volatility_contraction"],
+                "volume_contraction":     metrics["volume_contraction"],
+                "drawdown_from_high":     metrics["drawdown_from_high"],
+                "seg1_vol":               metrics["seg1_vol"],
+                "seg2_vol":               metrics["seg2_vol"],
+                "seg3_vol":               metrics["seg3_vol"],
+                "pivot_point":            pivot,
+                "entry_zone":             f"{current_price * 0.99:.2f}–{pivot:.2f}",
+                "stop_loss":              f"{stop_price:.2f}",
+                "stop_loss_pct":          round(stop_loss_pct, 1),
+                "cheat_entry":            False,
+                "wait_for_pullback":      False,
+                "original_breakout":      None,
+            }
+
         signals.append(signal)
 
     signals.sort(key=lambda x: x.get("vcp_score", 0), reverse=True)

@@ -108,13 +108,10 @@ def run_daily_scan(date: str = None) -> dict:
         print(f"  SPY趋势  : {market_env.get('spy_trend')}")
         print(f"  评估     : {market_env.get('reason', '')}")
 
-        if not market_env.get("risk_on", True) and not is_backtest:
-            print(f"\n  ⚠️  大盘风险偏好关闭，今日不扫描")
+        if not market_env.get("risk_on", True):
+            print(f"\n  ⚠️  大盘风险偏好关闭（VIX={market_env.get('vix')}），但仍继续扫描")
             print(f"  原因: {market_env.get('reason', '')}")
-            summary["runtime_minutes"] = (time.time() - scan_start) / 60
-            _write_summary(summary, [], market_env)
-            _send_risk_alert(market_env, today_label)
-            return summary
+            print(f"  所有信号将标注风险警告，建议降低仓位至正常的50%")
     except Exception as e:
         print(f"  [warn] 大盘环境获取失败: {e}，使用默认值继续")
     _done(t0, "大盘环境")
@@ -154,32 +151,73 @@ def run_daily_scan(date: str = None) -> dict:
         return summary
 
     # ── Step 5: 信号检测 ──────────────────────────────────────────────────────
-    t0 = _step("Step 5: 信号检测（EP + VCP）")
+    ep_signals_list = []
+    vcp_signals_list = []
+    bf_signals_list = []
+    ws_signals_list = []
+    t0 = _step("Step 5: 信号检测（EP + VCP + Bull Flag + Weinstein）")
+    _t5 = time.time()
+
+    _ts = time.time()
     try:
         from signals.ep_detector import detect as ep_detect
         ep_signals_list = ep_detect(tech_candidates)
         summary["ep_signals"] = len(ep_signals_list)
-        print(f"  EP 信号: {len(ep_signals_list)} 个")
     except Exception as e:
         print(f"  [error] EP 检测失败: {e}")
+    print(f"  ⏱ EP 耗时: {time.time()-_ts:.1f}s → {len(ep_signals_list)}只信号")
 
+    _ts = time.time()
     try:
         from signals.vcp_scorer import score as vcp_score
         vcp_signals_list = vcp_score(tech_candidates)
         summary["vcp_signals"] = len(vcp_signals_list)
-        print(f"  VCP 信号: {len(vcp_signals_list)} 个")
     except Exception as e:
         print(f"  [error] VCP 评分失败: {e}")
+    print(f"  ⏱ VCP 耗时: {time.time()-_ts:.1f}s → {len(vcp_signals_list)}只信号")
+
+    _ts = time.time()
+    try:
+        from signals.bull_flag_detector import detect as bf_detect
+        bf_signals_list = bf_detect(tech_candidates)
+        summary["bf_signals"] = len(bf_signals_list)
+    except Exception as e:
+        print(f"  [error] Bull Flag 检测失败: {e}")
+    print(f"  ⏱ Bull Flag 耗时: {time.time()-_ts:.1f}s → {len(bf_signals_list)}只信号")
+
+    _ts = time.time()
+    try:
+        from signals.weinstein_detector import detect as ws_detect
+        ws_signals_list = ws_detect(tech_candidates)
+        summary["ws_signals"] = len(ws_signals_list)
+    except Exception as e:
+        print(f"  [error] Weinstein 检测失败: {e}")
+    print(f"  ⏱ Weinstein 耗时: {time.time()-_ts:.1f}s → {len(ws_signals_list)}只信号")
+
+    # 去重：同一 ticker 保留最高分信号
+    _seen = set()
+    merged_signals = []
+    for s in ep_signals_list + vcp_signals_list + bf_signals_list + ws_signals_list:
+        t = s.get("ticker", "")
+        if t not in _seen:
+            _seen.add(t)
+            merged_signals.append(s)
+
+    print(f"\n  EP: {len(ep_signals_list)}只  VCP: {len(vcp_signals_list)}只  "
+          f"BullFlag: {len(bf_signals_list)}只  Weinstein: {len(ws_signals_list)}只  "
+          f"合并去重: {len(merged_signals)}只")
     _done(t0, "信号检测")
 
     # ── Step 6: Claude 信号生成 ───────────────────────────────────────────────
     t0 = _step("Step 6: Claude 综合分析")
     try:
         from signals.signal_generator import generate
-        all_signals = ep_signals_list + vcp_signals_list   # WATCH/SKIP 也保留，供报告使用
-        buy_signals = generate(ep_signals_list, vcp_signals_list, market_env)
+        all_signals  = generate(ep_signals_list, vcp_signals_list, market_env,
+                                bf_signals=bf_signals_list, ws_signals=ws_signals_list)
+        buy_signals  = [s for s in all_signals if str(s.get("action", "")).upper() in ("BUY", "BUY_RISKY")]
+        watch_signals = [s for s in all_signals if str(s.get("action", "")).upper() == "WATCH"]
         summary["buy_signals"] = len(buy_signals)
-        print(f"  最终 BUY 信号: {len(buy_signals)} 个")
+        print(f"  最终 BUY 信号: {len(buy_signals)} 个  WATCH: {len(watch_signals)} 个")
     except Exception as e:
         print(f"  [error] 信号生成失败: {e}")
     _done(t0, "Claude 分析")
@@ -191,7 +229,7 @@ def run_daily_scan(date: str = None) -> dict:
     report_text = ""
     try:
         from output.report_formatter import format_daily_report
-        report_text = format_daily_report(buy_signals + all_signals, market_env, summary)
+        report_text = format_daily_report(all_signals, market_env, summary)
         print("\n" + report_text)
     except Exception as e:
         print(f"  [error] 报告格式化失败: {e}")
@@ -303,15 +341,13 @@ def run_connection_test() -> None:
     except Exception:
         results["Finviz"] = False
 
-    # Stooq
+    # Polygon 历史数据
     try:
-        import requests as req
-        resp = req.get("https://stooq.com/q/d/l/?s=aapl.us&i=d", timeout=8)
-        results["Stooq"] = (resp.status_code == 200
-                            and "Exceeded" not in resp.text
-                            and "Date" in resp.text)
+        from data.tiingo_client import get_history as get_history_client
+        df_test = get_history_client("AAPL", days=5)
+        results["Polygon 历史数据"] = not df_test.empty
     except Exception:
-        results["Stooq"] = False
+        results["Polygon 历史数据"] = False
 
     # Claude API
     try:

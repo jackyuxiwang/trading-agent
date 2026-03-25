@@ -2,17 +2,18 @@
 signal_generator.py — Claude API 综合分析，生成最终交易信号
 
 流程：
-  1. 合并 EP + VCP 信号，去重（同只股票保留分数高的）
-  2. 逐只调用 claude-sonnet-4-6 分析，大盘风险状态注入 prompt
+  1. 合并 EP + VCP + BullFlag + Weinstein 信号，去重
+  2. 并发调用 claude-sonnet-4-6（最多5个并发），大盘风险状态注入 prompt
      - risk_on=True:  action 可以是 BUY / WATCH / SKIP
      - risk_on=False: action 可以是 BUY_RISKY / WATCH / SKIP
-  3. 保留 BUY 和 BUY_RISKY，按 confidence 降序
+  3. 保留 BUY / BUY_RISKY / WATCH，按 confidence 降序
 """
 
 import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -89,6 +90,8 @@ def _build_prompt(stock: dict, market_env: dict) -> str:
         score_label, score_val = "Bull Flag评分",   stock.get("bf_score")
     elif signal_type in ("WEINSTEIN_S2", "WEINSTEIN_S2_PULLBACK"):
         score_label, score_val = "Weinstein评分",   stock.get("weinstein_score")
+    elif signal_type == "VCP_CHEAT_ENTRY":
+        score_label, score_val = "VCP评分",         stock.get("vcp_score")
     else:
         score_label, score_val = "VCP评分",         stock.get("vcp_score")
 
@@ -119,8 +122,36 @@ def _build_prompt(stock: dict, market_env: dict) -> str:
         f"",
         f"信号数据：",
         f"- {score_label}：{score_val if score_val is not None else 'N/A'}",
-        f"- 建议入场区间：{stock.get('entry_zone', 'N/A')}",
-        f"- 建议止损位：{stock.get('stop_loss', 'N/A')}",
+        *(
+            [
+                f"- 策略类型：低吸等待策略（非追涨）",
+                f"- 当前价格：${fmt(stock.get('current_price'), decimals=2)}",
+                f"- 低吸买入区间：{stock.get('entry_zone', 'N/A')}",
+                f"- 距离低吸区：{fmt(stock.get('distance_to_cheat'), suffix='%')}",
+                f"- 原突破位（可加仓目标）：{stock.get('original_breakout', 'N/A')}",
+                f"- 建议止损位：{stock.get('stop_loss', 'N/A')}（止损幅度 {stock.get('stop_loss_pct', 'N/A')}%）",
+                f"",
+                f"低吸可行性分析：",
+                f"- 近5日价格趋势：{fmt(stock.get('slope_5d'), suffix='%', decimals=1)}（正=上涨，负=回调中）",
+                f"- 成交量趋势：{stock.get('vol_trend', 'N/A')}",
+                f"- 均线支撑：{stock.get('ma_support', 'N/A')}",
+                f"- 低吸可行性评分：{stock.get('cheat_entry_score', 'N/A')}/100（{stock.get('cheat_entry_feasibility', 'N/A')}）",
+                f"",
+                f"请根据以上数据判断：",
+                f"1. 这个低吸价位是否合理？是否有均线支撑？",
+                f"2. 近期是否有可能回调到此区间？",
+                f"3. 回调到低吸区时，成交量应如何配合才算有效？",
+                f"4. action 建议：",
+                f"   - 低吸可行性高 且 距离<5%：BUY（价格已接近低吸区）",
+                f"   - 低吸可行性高 或 中：WATCH（等待回调）",
+                f"   - 低吸可行性低：SKIP",
+            ]
+            if stock.get("cheat_entry") else
+            [
+                f"- 建议入场区间：{stock.get('entry_zone', 'N/A')}",
+                f"- 建议止损位：{stock.get('stop_loss', 'N/A')}",
+            ]
+        ),
         *(
             [
                 f"- 旗杆涨幅：+{fmt(stock.get('pole_gain_pct'), suffix='%')}（{stock.get('pole_duration', 'N/A')}天完成）",
@@ -286,39 +317,67 @@ def generate(ep_signals: list, vcp_signals: list, market_env: dict,
         raise EnvironmentError("ANTHROPIC_API_KEY 未设置，请检查 .env 文件")
     client = anthropic.Anthropic(api_key=api_key)
 
-    buy_signals = []
+    # ── 并发分析（每只独立线程，最多5个并发）─────────────────────────────────
+    MAX_WORKERS  = 5
+    t_parallel   = time.time()
+    raw_results  = {}   # index → (stock, result, elapsed)
 
-    for i, stock in enumerate(candidates, 1):
+    def _analyze_one(idx_stock):
+        idx, stock = idx_stock
         ticker = stock.get("ticker", "")
         stype  = stock.get("signal_type", "?")
         score  = stock.get("signal_score", 0)
-
-        print(f"  [{i}/{total}] 分析 {ticker} ({stype} score={score})…", end=" ", flush=True)
+        t_s    = time.time()
 
         prompt = _build_prompt(stock, market_env)
         result = _call_claude(client, prompt, ticker)
+        elapsed = time.time() - t_s
 
-        if result is None:
-            print("跳过（API失败）")
-            time.sleep(API_DELAY)
-            continue
+        action     = result.get("action", "SKIP").upper() if result else "SKIP"
+        confidence = result.get("confidence", 0)          if result else 0
 
-        action     = result.get("action", "SKIP").upper()
-        confidence = result.get("confidence", 0)
-        print(f"→ {action} (confidence={confidence})")
-
-        if action in ("BUY", "BUY_RISKY", "WATCH"):
+        if result and action in ("BUY", "BUY_RISKY", "WATCH"):
             result = _attach_position_size(stock, result)
 
+        return idx, ticker, stype, score, action, confidence, result, elapsed
+
+    print(f"  并发分析（max_workers={MAX_WORKERS}）…")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(_analyze_one, (i, s)): i
+                   for i, s in enumerate(candidates)}
+        for future in as_completed(futures):
+            try:
+                idx, ticker, stype, score, action, confidence, result, elapsed = future.result()
+                raw_results[idx] = (candidates[idx], action, confidence, result, elapsed)
+                status = f"→ {action} (confidence={confidence})  ⏱{elapsed:.1f}s"
+                print(f"  [{idx+1}/{total}] {ticker} ({stype} score={score}) {status}")
+            except Exception as e:
+                orig_idx = futures[future]
+                print(f"  [{orig_idx+1}/{total}] 分析失败: {e}")
+
+    t_parallel_elapsed = time.time() - t_parallel
+    t_serial_estimate  = sum(r[4] for r in raw_results.values())
+    print(f"\n  ⏱ 并发总耗时: {t_parallel_elapsed:.1f}s  "
+          f"（串行预计 {t_serial_estimate:.1f}s，"
+          f"提速 {t_serial_estimate/max(t_parallel_elapsed,0.1):.1f}x）")
+
+    buy_signals   = []
+    watch_signals = []
+
+    for idx in sorted(raw_results):
+        stock, action, confidence, result, _ = raw_results[idx]
+        if result is None:
+            continue
         if action in ("BUY", "BUY_RISKY"):
             buy_signals.append({**stock, **result})
-
-        time.sleep(API_DELAY)
+        elif action == "WATCH":
+            watch_signals.append({**stock, **result})
 
     buy_signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+    watch_signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
 
     print(f"\n[signal_generator] 完成")
-    print(f"  分析: {total} 只  BUY: {len(buy_signals)} 个")
+    print(f"  分析: {total} 只  BUY: {len(buy_signals)} 个  WATCH: {len(watch_signals)} 个")
 
     if buy_signals:
         print()
@@ -341,7 +400,7 @@ def generate(ep_signals: list, vcp_signals: list, market_env: dict,
             print(f"  {s['ticker']} — {s.get('reason', '')}")
             print(f"    风险: {s.get('risk_warning', '')}")
 
-    return buy_signals
+    return buy_signals + watch_signals
 
 
 # ── 测试入口 ──────────────────────────────────────────────────────────────────

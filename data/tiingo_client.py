@@ -1,20 +1,20 @@
 """
-tiingo_client.py — Tiingo EOD 历史数据客户端
+tiingo_client.py — 历史 OHLCV 数据客户端（内部改用 Polygon aggregates API）
 
-API 文档: https://api.tiingo.com/documentation/end-of-day
+对外接口不变：
+  get_history(ticker, days) → DataFrame(date, open, high, low, close, volume)
 
-get_history(ticker, days) → DataFrame(date, open, high, low, close, volume)
-
-- 当天缓存到 data/cache/tiingo_{ticker}_{date}.json
-- 无需请求间隔（Tiingo 免费档：1000次/小时）
+- 当天缓存到 data/cache/tiingo_{ticker}_{date}.json（文件名保持兼容）
+- Polygon Starter 无限请求，无需请求间隔
+- Polygon aggregates: /v2/aggs/ticker/{ticker}/range/1/day/{from}/{to}
 """
 
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 import requests
@@ -23,14 +23,14 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent.parent))
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-BASE_URL  = "https://api.tiingo.com/tiingo/daily/{ticker}/prices"
+BASE_URL  = "https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start}/{end}"
 CACHE_DIR = Path(__file__).parent / "cache"
 
 
 def _get_api_key() -> str:
-    key = os.getenv("TIINGO_API_KEY", "")
+    key = os.getenv("POLYGON_API_KEY", "")
     if not key:
-        raise EnvironmentError("TIINGO_API_KEY 未设置，请检查 .env 文件")
+        raise EnvironmentError("POLYGON_API_KEY 未设置，请检查 .env 文件")
     return key
 
 
@@ -41,18 +41,18 @@ def _cache_path(ticker: str, today: str) -> Path:
 
 def get_history(ticker: str, days: int = 60) -> pd.DataFrame:
     """
-    从 Tiingo 获取股票最近 N 个交易日的 EOD 数据。
+    获取股票最近 N 个交易日的 OHLCV 数据（via Polygon aggregates）。
 
     Args:
         ticker: 股票代码，如 "AAPL"
-        days:   返回最近 N 个交易日（实际按日历天数 * 1.5 回溯，保证覆盖）
+        days:   返回最近 N 个交易日
 
     Returns:
         DataFrame，列: date, open, high, low, close, volume（升序）
         获取失败时返回空 DataFrame
     """
-    today    = datetime.today().strftime("%Y-%m-%d")
-    cache_p  = _cache_path(ticker, today)
+    today   = datetime.today().strftime("%Y-%m-%d")
+    cache_p = _cache_path(ticker, today)
 
     # ── 读缓存 ────────────────────────────────────────────────────────────────
     if cache_p.exists():
@@ -64,76 +64,74 @@ def get_history(ticker: str, days: int = 60) -> pd.DataFrame:
         except Exception:
             pass
 
-    # ── 请求 Tiingo ───────────────────────────────────────────────────────────
+    # ── 请求 Polygon aggregates ───────────────────────────────────────────────
     try:
         api_key    = _get_api_key()
-        # 多取一些日历天数，确保能覆盖 N 个交易日（剔除周末/节假日）
         start_date = (datetime.today() - timedelta(days=int(days * 1.6) + 10)).strftime("%Y-%m-%d")
+        end_date   = today
 
-        url    = BASE_URL.format(ticker=ticker.lower())
+        url    = BASE_URL.format(ticker=ticker.upper(), start=start_date, end=end_date)
         params = {
-            "startDate": start_date,
-            "token":     api_key,
+            "apiKey":   api_key,
+            "adjusted": "true",
+            "limit":    50000,
         }
-        resp = requests.get(url, params=params, timeout=15)
 
-        if resp.status_code == 404:
-            # 股票不存在或 Tiingo 无数据
-            return pd.DataFrame()
-        if resp.status_code == 401:
-            print(f"  [tiingo] 401 认证失败，请检查 TIINGO_API_KEY")
-            return pd.DataFrame()
-        resp.raise_for_status()
+        for attempt in range(3):
+            resp = requests.get(url, params=params, timeout=15)
 
-        data = resp.json()
+            if resp.status_code == 404:
+                return pd.DataFrame()
+
+            if resp.status_code == 429:
+                # 不应出现（Starter 无限），但保留重试
+                wait = 2 ** attempt
+                print(f"  [polygon_hist] {ticker} 429 限速，等待 {wait}s")
+                time.sleep(wait)
+                continue
+
+            if resp.status_code != 200:
+                print(f"  [polygon_hist] {ticker} HTTP {resp.status_code}")
+                return pd.DataFrame()
+
+            break
+        else:
+            return pd.DataFrame()
+
+        payload = resp.json()
+
     except EnvironmentError as e:
-        print(f"  [tiingo] {e}")
+        print(f"  [polygon_hist] {e}")
         return pd.DataFrame()
     except Exception as e:
-        print(f"  [tiingo] {ticker} 请求失败: {e}")
+        print(f"  [polygon_hist] {ticker} 请求失败: {e}")
         return pd.DataFrame()
 
-    if not data:
+    results = payload.get("results")
+    if not results:
         return pd.DataFrame()
 
     # ── 规范化字段 ────────────────────────────────────────────────────────────
     try:
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(results)
 
-        # Tiingo 返回字段：date, open, high, low, close, volume (adjClose 等可选)
-        rename = {
-            "date":        "date",
-            "open":        "open",
-            "high":        "high",
-            "low":         "low",
-            "close":       "close",
-            "volume":      "volume",
-            "adjClose":    "adj_close",
-        }
-        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+        # Polygon 字段: t(ms timestamp), o, h, l, c, v
+        df["date"]   = pd.to_datetime(df["t"], unit="ms").dt.strftime("%Y-%m-%d")
+        df["open"]   = pd.to_numeric(df["o"], errors="coerce")
+        df["high"]   = pd.to_numeric(df["h"], errors="coerce")
+        df["low"]    = pd.to_numeric(df["l"], errors="coerce")
+        df["close"]  = pd.to_numeric(df["c"], errors="coerce")
+        df["volume"] = pd.to_numeric(df["v"], errors="coerce").fillna(0).astype(int)
 
-        required = {"date", "open", "high", "low", "close", "volume"}
-        if not required.issubset(df.columns):
-            return pd.DataFrame()
-
-        # 日期只保留 YYYY-MM-DD
-        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-
-        for col in ("open", "high", "low", "close"):
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype(int)
-
+        df = df[["date", "open", "high", "low", "close", "volume"]]
         df = df[df["close"] > 0].copy()
         df = df.sort_values("date").reset_index(drop=True)
 
         if df.empty or len(df) < 2:
             return pd.DataFrame()
 
-        # 只保留需要的列，按升序存缓存
-        df = df[["date", "open", "high", "low", "close", "volume"]]
-
     except Exception as e:
-        print(f"  [tiingo] {ticker} 数据解析失败: {e}")
+        print(f"  [polygon_hist] {ticker} 数据解析失败: {e}")
         return pd.DataFrame()
 
     # ── 写缓存 ────────────────────────────────────────────────────────────────
@@ -151,10 +149,16 @@ def get_history(ticker: str, days: int = 60) -> pd.DataFrame:
 # ── 测试入口 ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("测试 Tiingo 数据获取: AAOI 最近60天")
-    df = get_history("AAOI", days=60)
-    if df.empty:
-        print("  ❌ 获取失败，请检查 TIINGO_API_KEY 配置")
-    else:
-        print(f"  ✅ 共 {len(df)} 行")
-        print(df.head(5).to_string(index=False))
+    tickers = ["AAOI", "KRMN", "OS"]
+    print(f"测试 Polygon 历史数据获取（60天）\n{'='*50}")
+
+    for tkr in tickers:
+        t0 = time.time()
+        df = get_history(tkr, days=60)
+        elapsed = time.time() - t0
+
+        if df.empty:
+            print(f"\n{tkr}: ❌ 获取失败")
+        else:
+            print(f"\n{tkr}: ✅ 共 {len(df)} 行  耗时 {elapsed:.2f}s")
+            print(df.head(3).to_string(index=False))
