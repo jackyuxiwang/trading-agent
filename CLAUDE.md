@@ -12,22 +12,23 @@
 - Polygon.io Starter（$29/月）：
   * 全市场每日 OHLCV（Grouped Daily，一次调用）
   * 个股历史日线（替代 Stooq/Tiingo，无限速）
-- Finviz：基本面初筛（EPS/Sales增速、毛利率）
+- FMP（Financial Modeling Prep）：基本面批量筛选主路径（company-screener，需付费套餐）
+- Finviz：基本面筛选备用路径（FMP 不可用时，并发5线程逐只查询，约15分钟）
 - yfinance：大盘环境（VIX/SPY）
-- FMP：备用基本面数据源
 
 ## 当前进度
 - P0 完成：项目骨架、依赖、API keys
 - P1 完成：polygon_client、eodhd_client、market_env_client、tiingo_client（内部用Polygon）
-- P2 完成：fundamental_filter（331只）、technical_filter（52-60只）
+- P2 完成：fundamental_filter（329只）、technical_filter（52-60只）
 - P3 完成：ep_detector、vcp_scorer（含低吸策略）、bull_flag_detector、weinstein_detector、signal_generator
 - P4 完成：discord_alert、report_formatter（含WATCH信号）、log_writer
 - P5 完成：main.py 主调度器（并发Claude分析）
 - Portfolio 完成：position_sizer、virtual_account、trade_logger、weekly_report
-- 待完成：部署到服务器自动运行、Cup & Handle、Livermore Pivotal Point
+- 部署完成：run_daily.sh + cron（HKT 5:30 AM 周一至周五）+ pmset 自动唤醒（5:25 AM）
+- 待完成：Cup & Handle、Livermore Pivotal Point
 
 ## 扫描漏斗
-全市场11000+只 → Polygon量价初筛 → Finviz基本面精筛331只 → 技术面确认52-60只 → 信号引擎 → Discord推送
+全市场11000+只 → Polygon量价初筛（~2800只）→ FMP/Finviz基本面精筛（~329只）→ 技术面确认（52-60只）→ 信号引擎 → Discord推送
 
 ## 筛选参数
 - 市值：5亿–500亿美元
@@ -58,7 +59,11 @@
 - 大盘风险高时仓位减半
 
 ## 关键设计决策
-- fundamental_filter：Polygon量价初筛 + Finviz逐只查基本面
+- fundamental_filter：两步走
+  * Step1：Polygon量价初筛（~2800只）
+  * Step2：FMP company-screener 批量一次请求取交集（主路径，秒级）；FMP 402/不可用时 fallback 到 Finviz 并发5线程逐只查询（~15分钟）
+  * FMP 免费版不支持 company-screener（需付费套餐）；当前使用 Finviz fallback
+  * 所有缓存按日期命名（fundamental_candidates_{YYYY-MM-DD}.json），每天只跑一次
 - technical_filter：Polygon历史数据计算技术指标（tiingo_client.py内部用Polygon aggregates）
 - EP detector：复用 technical_filter 缓存的 last_open/prev_close，零额外API请求
 - VCP/BullFlag/Weinstein：各自调用 tiingo_client（内部Polygon），结果按日期缓存到 data/cache/
@@ -67,6 +72,7 @@
 - 告警：Discord Webhook，每天收盘后推送（BUY+WATCH信号均显示）
 - 缓存目录：data/cache/，当天缓存不重复请求（tiingo_{TICKER}_{date}.json 格式）
 - risk_on=False 时：不退出，继续扫描，信号标注风险警告，报告置顶红色提示
+- 定时运行：run_daily.sh + cron（HKT 5:30 AM 周一至周五）+ pmset 唤醒（5:25 AM）；日志写入 logs/daily_{date}.log，保留30天
 
 ## API Keys（在 .env 文件中）
 ANTHROPIC_API_KEY, POLYGON_API_KEY, EODHD_API_KEY, FMP_API_KEY,
