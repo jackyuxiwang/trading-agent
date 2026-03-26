@@ -6,7 +6,9 @@ fundamental_filter.py — 两步走基本面筛选模块
   - close > $5
   - close > open * 0.5（排除异常数据）
 
-第二步（finvizfinance quote）: 基本面精筛，逐只查询
+第二步（FMP Screener，Finviz 备用）: 基本面精筛
+  主路径：FMP company-screener 一次批量请求，取与 Stage1 的交集
+  备用路径：逐只查询 finvizfinance.quote（并发5线程）
   - EPS Q/Q > 10%
   - Sales Q/Q > 10%
   - Gross Margin > 20%
@@ -14,13 +16,21 @@ fundamental_filter.py — 两步走基本面筛选模块
 """
 
 import json
+import os
+import random
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -40,7 +50,12 @@ STAGE2_MIN_GROSS_MARGIN = 20.0  # %
 STAGE2_MIN_MARKET_CAP   = 500_000_000       # 5亿
 STAGE2_MAX_MARKET_CAP   = 50_000_000_000    # 500亿
 
-STAGE2_REQUEST_DELAY    = 0.2   # 秒，控制 finviz 请求频率
+STAGE2_WORKERS          = 5     # Finviz 并发线程数（备用路径，不超过5）
+STAGE2_JITTER_MIN       = 0.8   # Finviz 随机延迟下限（秒）
+STAGE2_JITTER_MAX       = 1.6   # Finviz 随机延迟上限（秒）
+
+FMP_SCREENER_URL        = "https://financialmodelingprep.com/stable/company-screener"
+FMP_SCREENER_LIMIT      = 10_000  # 单次拉取上限，覆盖全市场
 
 
 # ── 缓存工具 ──────────────────────────────────────────────────────────────────
@@ -193,18 +208,112 @@ def run_stage1(date: Optional[str] = None) -> list:
     return tickers
 
 
-# ── 第二步：finvizfinance 基本面精筛 ──────────────────────────────────────────
+# ── 第二步（主路径）：FMP Screener 批量筛选 ───────────────────────────────────
+
+def _fetch_fmp_screener() -> Optional[list]:
+    """
+    调用 FMP company-screener 接口，一次请求返回所有符合基本面条件的股票。
+
+    FMP 返回的增速字段是小数（0.10 = 10%），毛利率同理，
+    此处统一转为百分比（乘以 100）存入 eps_growth_qoq / sales_growth_qoq / gross_margin。
+
+    Returns:
+        符合条件的股票 dict 列表；API 失败或返回空时返回 None。
+    """
+    api_key = os.getenv("FMP_API_KEY", "")
+    if not api_key:
+        print("  [warn] FMP_API_KEY 未设置，跳过 FMP screener")
+        return None
+
+    params = {
+        "revenueGrowthQuarterlyGreaterThan": STAGE2_MIN_SALES_GROWTH / 100,
+        "epsGrowthQuarterlyGreaterThan":     STAGE2_MIN_EPS_GROWTH   / 100,
+        "grossProfitMarginGreaterThan":      STAGE2_MIN_GROSS_MARGIN / 100,
+        "marketCapMoreThan":                 STAGE2_MIN_MARKET_CAP,
+        "marketCapLowerThan":                STAGE2_MAX_MARKET_CAP,
+        "isActivelyTrading":                 "true",
+        "exchange":                          "NASDAQ,NYSE",
+        "limit":                             FMP_SCREENER_LIMIT,
+        "apikey":                            api_key,
+    }
+
+    try:
+        print(f"  [fmp] GET {FMP_SCREENER_URL} (limit={FMP_SCREENER_LIMIT})")
+        resp = requests.get(FMP_SCREENER_URL, params=params, timeout=30)
+
+        if resp.status_code == 402:
+            print(f"  [warn] FMP 402 Payment Required：套餐权限不足，切换 Finviz fallback")
+            return None
+        if resp.status_code == 429:
+            print(f"  [warn] FMP 429 限流，切换 Finviz fallback")
+            return None
+
+        resp.raise_for_status()
+        data = resp.json()
+
+    except Exception as e:
+        print(f"  [warn] FMP screener 请求失败: {e}，切换 Finviz fallback")
+        return None
+
+    if not isinstance(data, list) or len(data) == 0:
+        print(f"  [warn] FMP screener 返回空列表，切换 Finviz fallback")
+        return None
+
+    results = []
+    for item in data:
+        ticker = item.get("symbol", "")
+        if not ticker:
+            continue
+
+        # FMP 增速字段是小数，转百分比
+        eps_raw   = item.get("epsGrowthQuarterly")
+        sales_raw = item.get("revenueGrowthQuarterly")
+        gm_raw    = item.get("grossProfitMargin")
+
+        eps   = round(float(eps_raw)   * 100, 2) if eps_raw   is not None else None
+        sales = round(float(sales_raw) * 100, 2) if sales_raw is not None else None
+        gm    = round(float(gm_raw)    * 100, 2) if gm_raw    is not None else None
+        mc    = item.get("marketCap")
+
+        results.append({
+            "ticker":           ticker,
+            "company":          item.get("companyName", ""),
+            "sector":           item.get("sector", ""),
+            "industry":         item.get("industry", ""),
+            "eps_growth_qoq":   eps,
+            "sales_growth_qoq": sales,
+            "gross_margin":     gm,
+            "market_cap":       mc,
+            "market_cap_raw":   _format_market_cap(mc),
+            "float_shares":     None,
+            "float_short":      None,
+            # price/volume 后续由 Polygon poly_map 覆盖；此处保留 FMP 值作兜底
+            "price":            item.get("price"),
+            "volume":           item.get("volume"),
+        })
+
+    print(f"  [fmp] screener 返回 {len(results)} 只符合基本面条件的股票")
+    return results
+
+
+# ── 第二步（备用路径）：finvizfinance 逐只查询 ────────────────────────────────
 
 def _fetch_fundamentals(ticker: str) -> Optional[dict]:
     """
     用 finvizfinance.quote 获取单只股票基本面数据。
+    加随机 jitter 延迟，遇到 429/封禁返回 None 并打印警告。
     返回解析后的 dict，获取失败返回 None。
     """
     from finvizfinance.quote import finvizfinance as fvf
 
+    time.sleep(random.uniform(STAGE2_JITTER_MIN, STAGE2_JITTER_MAX))
+
     try:
         info = fvf(ticker).ticker_fundament()
-    except Exception:
+    except Exception as e:
+        msg = str(e).lower()
+        if "429" in msg or "too many" in msg or "blocked" in msg or "rate" in msg:
+            print(f"  [warn] {ticker}: 被限速/封禁，跳过 ({e})")
         return None
 
     eps   = _parse_pct(info.get("EPS Q/Q"))
@@ -247,14 +356,17 @@ def _passes_stage2(data: dict) -> bool:
 
 def run_stage2(tickers: list, polygon_date: Optional[str] = None) -> list:
     """
-    第二步：对初筛候选逐只查询 finviz 基本面，精筛出最终候选。
+    第二步：基本面精筛。
+
+    主路径：FMP Screener 一次批量请求 → 与 Stage1 取交集（秒级完成）
+    备用路径：finvizfinance 逐只并发查询（约15分钟）
 
     Args:
         tickers:      第一步筛出的 ticker 列表
-        polygon_date: 用于从 Polygon 数据附加价格/成交量信息
+        polygon_date: 用于从 Polygon 数据覆盖价格/成交量
 
     Returns:
-        通过精筛的股票 dict 列表
+        通过精筛的股票 dict 列表（按成交量降序）
     """
     today = datetime.today().strftime("%Y-%m-%d")
     cache_key = f"fundamental_candidates_{today}"
@@ -263,54 +375,86 @@ def run_stage2(tickers: list, polygon_date: Optional[str] = None) -> list:
         print(f"[stage2] 从缓存加载 {len(cached)} 只最终候选")
         return cached
 
-    # 加载 Polygon 价格/成交量数据，用于最终附加到结果
+    # 加载 Polygon 价格/成交量数据，用于覆盖最终结果
     pdate = polygon_date or _last_trading_date()
     poly_df = get_grouped_daily(pdate)
     poly_map = {}
     if not poly_df.empty:
         poly_map = poly_df.set_index("ticker")[["close", "volume", "vwap"]].to_dict("index")
 
-    total     = len(tickers)
-    passed    = []
-    skipped   = 0
-    t_start   = time.time()
+    stage1_set = set(tickers)
+    t_start    = time.time()
+    passed     = []
 
-    print(f"[stage2] 开始基本面精筛，共 {total:,} 只…")
+    # ── 主路径：FMP Screener ──────────────────────────────────────────────────
+    print(f"[stage2] 尝试 FMP Screener 批量筛选…")
+    fmp_results = _fetch_fmp_screener()
+
+    if fmp_results:
+        # 取与 Stage1 量价初筛的交集
+        for stock in fmp_results:
+            ticker = stock["ticker"]
+            if ticker not in stage1_set:
+                continue
+            # 用 Polygon 数据覆盖价格/成交量（更实时）
+            poly_info = poly_map.get(ticker, {})
+            if poly_info.get("close"):
+                stock["price"]  = poly_info["close"]
+            if poly_info.get("volume"):
+                stock["volume"] = int(poly_info["volume"])
+            stock["vwap"] = poly_info.get("vwap")
+            passed.append(stock)
+
+        elapsed = time.time() - t_start
+        passed.sort(key=lambda x: x.get("volume") or 0, reverse=True)
+        print(f"[stage2] FMP 完成：Stage1={len(stage1_set)} 只，"
+              f"FMP符合基本面={len(fmp_results)} 只，"
+              f"交集={len(passed)} 只，耗时 {elapsed:.1f}s")
+        _save_cache(cache_key, passed)
+        return passed
+
+    # ── 备用路径：Finviz 并发逐只查询 ────────────────────────────────────────
+    print(f"[stage2] FMP 不可用，切换 Finviz fallback（{len(tickers):,} 只，并发 {STAGE2_WORKERS} 线程）…")
     print(f"  条件: EPS Q/Q>{STAGE2_MIN_EPS_GROWTH}% | Sales Q/Q>{STAGE2_MIN_SALES_GROWTH}% | "
           f"GM>{STAGE2_MIN_GROSS_MARGIN}% | MarketCap 0.5B–50B")
 
-    for i, ticker in enumerate(tickers, 1):
-        # 进度 + 预估剩余时间
-        if i % 100 == 0 or i == total:
-            elapsed  = time.time() - t_start
-            rate     = i / elapsed if elapsed > 0 else 1
-            eta_sec  = (total - i) / rate
-            eta_str  = f"{int(eta_sec//60)}m{int(eta_sec%60)}s"
-            print(f"  [进度] {i:4d}/{total}  通过 {len(passed):3d} 只  "
-                  f"跳过 {skipped:3d} 只  ETA {eta_str}")
+    total   = len(tickers)
+    skipped = 0
+    done    = 0
+    lock    = threading.Lock()
 
+    def _worker(ticker: str):
+        nonlocal done, skipped
         data = _fetch_fundamentals(ticker)
-        if data is None:
-            skipped += 1
-            time.sleep(STAGE2_REQUEST_DELAY)
-            continue
+        with lock:
+            done += 1
+            if data is None:
+                skipped += 1
+            elif _passes_stage2(data):
+                poly_info = poly_map.get(ticker, {})
+                data["price"]  = poly_info.get("close")
+                data["volume"] = int(poly_info.get("volume", 0)) or None
+                data["vwap"]   = poly_info.get("vwap")
+                passed.append(data)
+            if done % 50 == 0 or done == total:
+                elapsed = time.time() - t_start
+                rate    = done / elapsed if elapsed > 0 else 1
+                eta_sec = (total - done) / rate
+                eta_str = f"{int(eta_sec//60)}m{int(eta_sec%60)}s"
+                print(f"  [进度] {done:4d}/{total}  通过 {len(passed):3d} 只  "
+                      f"跳过 {skipped:3d} 只  已用 {elapsed:.0f}s  ETA {eta_str}")
 
-        if _passes_stage2(data):
-            # 附加价格和成交量
-            poly_info = poly_map.get(ticker, {})
-            data["price"]  = poly_info.get("close")
-            data["volume"] = int(poly_info.get("volume", 0)) or None
-            data["vwap"]   = poly_info.get("vwap")
-            passed.append(data)
+    with ThreadPoolExecutor(max_workers=STAGE2_WORKERS) as executor:
+        futures = {executor.submit(_worker, t): t for t in tickers}
+        for f in as_completed(futures):
+            exc = f.exception()
+            if exc:
+                print(f"  [error] {futures[f]}: 未捕获异常 {exc}")
 
-        time.sleep(STAGE2_REQUEST_DELAY)
-
-    # 按成交量降序
     passed.sort(key=lambda x: x.get("volume") or 0, reverse=True)
-
     elapsed_total = time.time() - t_start
-    print(f"\n[stage2] 完成！处理 {total:,} 只，通过 {len(passed)} 只，"
-          f"跳过 {skipped} 只，耗时 {elapsed_total/60:.1f} 分钟")
+    print(f"\n[stage2] Finviz 完成！处理 {total:,} 只，通过 {len(passed)} 只，"
+          f"跳过 {skipped} 只，耗时 {elapsed_total:.1f}s（{elapsed_total/60:.1f} 分钟）")
 
     _save_cache(cache_key, passed)
     return passed
