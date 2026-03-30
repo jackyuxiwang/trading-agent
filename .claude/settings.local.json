@@ -25,7 +25,18 @@
       "Bash(python main.py)",
       "Bash(python -c \":*)",
       "Bash(python data/tiingo_client.py)",
-      "Bash(python -c \"from signals.signal_generator import generate; print\\(''OK''\\)\")"
+      "Bash(python -c \"from signals.signal_generator import generate; print\\(''OK''\\)\")",
+      "Bash(source venv/bin/activate)",
+      "Bash(time python:*)",
+      "Bash(wait)",
+      "Bash(PYTHONUNBUFFERED=1 python -m screener.fundamental_filter)",
+      "Bash(crontab -l)",
+      "Bash(chmod +x /Users/jackwang/trading-agent/run_daily.sh)",
+      "Bash(bash run_daily.sh)",
+      "Bash(sudo pmset:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }
