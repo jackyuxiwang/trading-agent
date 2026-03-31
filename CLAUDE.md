@@ -23,6 +23,7 @@
 - P3 完成：ep_detector、vcp_scorer（含低吸策略）、bull_flag_detector、weinstein_detector、bottom_finder_detector、signal_generator
 - P4 完成：discord_alert、report_formatter（含WATCH信号）、log_writer
 - P5 完成：main.py 主调度器（并发Claude分析）
+- P6 完成：即时 EP 扫描器（polygon_snapshot.py + realtime_ep_scanner.py + main_realtime.py）
 - Portfolio 完成：position_sizer、virtual_account、trade_logger、weekly_report
 - 部署完成：run_daily.sh + cron（HKT 5:30 AM 周一至周五）+ pmset 自动唤醒（5:25 AM）
 - 待完成：Cup & Handle、Livermore Pivotal Point
@@ -77,6 +78,12 @@ Bottom Finder 并行路径：基本面候选（~329只）→ bottom_finder_detec
 - 缓存目录：data/cache/，当天缓存不重复请求（tiingo_{TICKER}_{date}.json 格式）
 - risk_on=False 时：不退出，继续扫描，信号标注风险警告，报告置顶红色提示
 - 定时运行：run_daily.sh + cron（HKT 5:30 AM 周一至周五）+ pmset 唤醒（5:25 AM）；日志写入 logs/daily_{date}.log，保留30天
+- 即时 EP 扫描器（main_realtime.py）：
+  * 数据源：Polygon /v2/snapshot gainers + /v3/snapshot 批量查询（无需Claude API）
+  * 盘前 4:00–9:30 ET：scan_premarket()，漲幅 ≥ 5%，每 5 分钟扫描
+  * 开盘 9:30–10:30 ET：scan_opening()，跳空 ≥ 5%，BUY/WATCH/FADE 分类
+  * 信号去重：in-memory sent_tickers，每交易日重置
+  * 用法：python main_realtime.py --test | --once | (持续模式)
 
 ## API Keys（在 .env 文件中）
 ANTHROPIC_API_KEY, POLYGON_API_KEY, EODHD_API_KEY, FMP_API_KEY,
