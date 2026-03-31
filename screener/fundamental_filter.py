@@ -369,7 +369,7 @@ def run_stage2(tickers: list, polygon_date: Optional[str] = None) -> list:
         通过精筛的股票 dict 列表（按成交量降序）
     """
     today = datetime.today().strftime("%Y-%m-%d")
-    cache_key = f"fundamental_candidates_{today}"
+    cache_key = f"fundamental_candidates_{polygon_date or today}"
     cached = _load_cache(cache_key)
     if cached is not None:
         print(f"[stage2] 从缓存加载 {len(cached)} 只最终候选")

@@ -157,20 +157,23 @@ def get_grouped_daily(date: Optional[str] = None) -> pd.DataFrame:
     return df
 
 
-def get_history(ticker: str, days: int = 60) -> pd.DataFrame:
+def get_history(ticker: str, days: int = 60,
+                end_date: Optional[str] = None) -> pd.DataFrame:
     """
     获取单只股票最近 N 天的日线 OHLCV 数据。
 
     Args:
-        ticker: 股票代码，如 "AAPL"
-        days:   往前取多少个日历天（实际交易日更少）
+        ticker:   股票代码，如 "AAPL"
+        days:     往前取多少个日历天（实际交易日更少）
+        end_date: 截止日期 "YYYY-MM-DD"，默认取最近交易日（回测时传入指定日期）
 
     Returns:
         DataFrame，列: date, ticker, open, high, low, close, volume, vwap, trades
     """
-    print(f"[polygon] get_history ticker={ticker} days={days}")
+    print(f"[polygon] get_history ticker={ticker} days={days}"
+          + (f" end_date={end_date}" if end_date else ""))
 
-    to_date = _last_weekday()
+    to_date = end_date if end_date else _last_weekday()
     from_date = (datetime.strptime(to_date, "%Y-%m-%d") - timedelta(days=days)).strftime("%Y-%m-%d")
 
     cache_key = f"history_{ticker}_{from_date}_{to_date}"

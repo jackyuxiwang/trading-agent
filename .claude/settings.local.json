@@ -36,7 +36,9 @@
       "Bash(sudo pmset:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(python -c \"from signals.bottom_finder_detector import detect; print\\(''✅ import OK''\\)\")",
+      "Bash(python:*)"
     ]
   }
 }

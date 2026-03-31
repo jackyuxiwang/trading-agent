@@ -179,18 +179,19 @@ def _compute_technicals(df: pd.DataFrame) -> dict:
 
 # ── 公开接口 ──────────────────────────────────────────────────────────────────
 
-def run(candidates: list) -> list:
+def run(candidates: list, date: Optional[str] = None) -> list:
     """
     对基本面候选股执行技术面过滤。
 
     Args:
         candidates: fundamental_filter.run() 返回的股票 dict 列表
+        date:       指定日期 "YYYY-MM-DD"（回测用），默认 None 表示今天
 
     Returns:
         通过技术面过滤的股票列表（附带技术指标），按 technical_score 降序
     """
     today = datetime.today().strftime("%Y-%m-%d")
-    cache_key = f"technical_candidates_{today}"
+    cache_key = f"technical_candidates_{date or today}"
     cached = _load_cache(cache_key)
     if cached is not None:
         print(f"[technical_filter] 从缓存加载 {len(cached)} 只技术面候选")

@@ -20,7 +20,7 @@
 - P0 完成：项目骨架、依赖、API keys
 - P1 完成：polygon_client、eodhd_client、market_env_client、tiingo_client（内部用Polygon）
 - P2 完成：fundamental_filter（329只）、technical_filter（52-60只）
-- P3 完成：ep_detector、vcp_scorer（含低吸策略）、bull_flag_detector、weinstein_detector、signal_generator
+- P3 完成：ep_detector、vcp_scorer（含低吸策略）、bull_flag_detector、weinstein_detector、bottom_finder_detector、signal_generator
 - P4 完成：discord_alert、report_formatter（含WATCH信号）、log_writer
 - P5 完成：main.py 主调度器（并发Claude分析）
 - Portfolio 完成：position_sizer、virtual_account、trade_logger、weekly_report
@@ -29,6 +29,7 @@
 
 ## 扫描漏斗
 全市场11000+只 → Polygon量价初筛（~2800只）→ FMP/Finviz基本面精筛（~329只）→ 技术面确认（52-60只）→ 信号引擎 → Discord推送
+Bottom Finder 并行路径：基本面候选（~329只）→ bottom_finder_detector（跳过技术面，直接用Polygon 365天日线）
 
 ## 筛选参数
 - 市值：5亿–500亿美元
@@ -37,12 +38,15 @@
 - Stage2：收盘价 > MA20 且 > MA50
 - technical_score >= 35
 
-## 四种信号形态
+## 五种信号形态
 1. EP（Episodic Pivot）：催化剂驱动跳空，缺口>5%，放量，收阳线
 2. VCP（Volatility Contraction Pattern）：三段波动递减，量缩后突破
    - 含低吸策略（VCP_CHEAT_ENTRY）：止损>10%时计算低吸买入区，评估可行性
 3. Bull Flag：旗杆涨幅>15%，旗面量缩浅回调，放量突破
 4. Weinstein Stage 2：30周均线判断Stage，识别S2突破和回调买点
+5. Bottom Finder：长期下跌（>=35%）→底部築底（25-150天）→ Higher Lows → 量缩 → 放量突破
+   - 使用 fund_candidates（非 tech_candidates），跳过 Stage 2 硬性条件
+   - Polygon 365天日线，内建快取（history_{ticker}_{from}_{to}.json）
 
 ## 信号类型
 - BUY：大盘正常，直接买入

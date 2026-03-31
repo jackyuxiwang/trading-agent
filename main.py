@@ -66,19 +66,21 @@ def run_daily_scan(date: str = None) -> dict:
         "stage3_count":    0,
         "ep_signals":      0,
         "vcp_signals":     0,
+        "bottom_signals":  0,
         "buy_signals":     0,
         "risk_on":         True,
         "vix":             None,
         "spy_trend":       None,
         "runtime_minutes": 0,
     }
-    all_signals  = []
-    market_env   = {"risk_on": True, "vix": None, "spy_trend": None, "reason": ""}
-    fund_candidates  = []
-    tech_candidates  = []
-    ep_signals_list  = []
-    vcp_signals_list = []
-    buy_signals      = []
+    all_signals       = []
+    market_env        = {"risk_on": True, "vix": None, "spy_trend": None, "reason": ""}
+    fund_candidates   = []
+    tech_candidates   = []
+    ep_signals_list   = []
+    vcp_signals_list  = []
+    bottom_signals_list = []
+    buy_signals       = []
 
     # ── Step 1: 交易日检查 ────────────────────────────────────────────────────
     if not is_backtest:
@@ -137,7 +139,7 @@ def run_daily_scan(date: str = None) -> dict:
     t0 = _step("Step 4: 技术面过滤")
     try:
         from screener.technical_filter import run as technical_run
-        tech_candidates = technical_run(fund_candidates)
+        tech_candidates = technical_run(fund_candidates, date=date)
         summary["stage3_count"] = len(tech_candidates)
         print(f"  技术面候选: {len(tech_candidates)} 只")
     except Exception as e:
@@ -155,7 +157,8 @@ def run_daily_scan(date: str = None) -> dict:
     vcp_signals_list = []
     bf_signals_list = []
     ws_signals_list = []
-    t0 = _step("Step 5: 信号检测（EP + VCP + Bull Flag + Weinstein）")
+    bottom_signals_list = []
+    t0 = _step("Step 5: 信号检测（EP + VCP + Bull Flag + Weinstein + Bottom Finder）")
     _t5 = time.time()
 
     _ts = time.time()
@@ -194,10 +197,21 @@ def run_daily_scan(date: str = None) -> dict:
         print(f"  [error] Weinstein 检测失败: {e}")
     print(f"  ⏱ Weinstein 耗时: {time.time()-_ts:.1f}s → {len(ws_signals_list)}只信号")
 
+    # Bottom Finder 使用 fund_candidates（未进入 Stage 2 的底部反转股）
+    _ts = time.time()
+    try:
+        from signals.bottom_finder_detector import detect as bottom_detect
+        bottom_signals_list = bottom_detect(fund_candidates, date=date)
+        summary["bottom_signals"] = len(bottom_signals_list)
+    except Exception as e:
+        print(f"  [error] Bottom Finder 检测失败: {e}")
+    print(f"  ⏱ Bottom Finder 耗时: {time.time()-_ts:.1f}s → {len(bottom_signals_list)}只信号")
+
     # 去重：同一 ticker 保留最高分信号
     _seen = set()
     merged_signals = []
-    for s in ep_signals_list + vcp_signals_list + bf_signals_list + ws_signals_list:
+    for s in (ep_signals_list + vcp_signals_list + bf_signals_list
+              + ws_signals_list + bottom_signals_list):
         t = s.get("ticker", "")
         if t not in _seen:
             _seen.add(t)
@@ -205,7 +219,7 @@ def run_daily_scan(date: str = None) -> dict:
 
     print(f"\n  EP: {len(ep_signals_list)}只  VCP: {len(vcp_signals_list)}只  "
           f"BullFlag: {len(bf_signals_list)}只  Weinstein: {len(ws_signals_list)}只  "
-          f"合并去重: {len(merged_signals)}只")
+          f"BottomFinder: {len(bottom_signals_list)}只  合并去重: {len(merged_signals)}只")
     _done(t0, "信号检测")
 
     # ── Step 6: Claude 信号生成 ───────────────────────────────────────────────
@@ -213,7 +227,8 @@ def run_daily_scan(date: str = None) -> dict:
     try:
         from signals.signal_generator import generate
         all_signals  = generate(ep_signals_list, vcp_signals_list, market_env,
-                                bf_signals=bf_signals_list, ws_signals=ws_signals_list)
+                                bf_signals=bf_signals_list, ws_signals=ws_signals_list,
+                                bottom_signals=bottom_signals_list)
         buy_signals  = [s for s in all_signals if str(s.get("action", "")).upper() in ("BUY", "BUY_RISKY")]
         watch_signals = [s for s in all_signals if str(s.get("action", "")).upper() == "WATCH"]
         summary["buy_signals"] = len(buy_signals)

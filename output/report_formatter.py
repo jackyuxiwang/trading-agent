@@ -120,6 +120,31 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
                     lines.append(f"💬 {reason}")
                 if risk_warn:
                     lines.append(f"⚠️ {risk_warn}")
+            elif stype == "BOTTOM_FINDER":
+                bf_score     = s.get("score", "?")
+                decline_pct  = s.get("decline_pct")
+                base_days    = s.get("base_days", "?")
+                higher_lows  = s.get("higher_lows", "?")
+                vol_contract = s.get("vol_contract_ratio")
+                breakout_vol = s.get("breakout_vol_ratio")
+                rr           = s.get("risk_reward", "N/A")
+
+                decline_str  = f"{decline_pct:.1f}%" if isinstance(decline_pct, (int, float)) else "N/A"
+                vol_cont_str = f"{vol_contract:.0f}%" if isinstance(vol_contract, (int, float)) else "N/A"
+                brk_vol_str  = f"{breakout_vol:.1f}x" if isinstance(breakout_vol, (int, float)) else "N/A"
+                rr_str       = f"{rr:.1f}:1" if isinstance(rr, (int, float)) else str(rr)
+
+                lines.append(f"🏔 {ticker} — 底部反轉（評分 {bf_score}/100）（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"入場區間：{entry}")
+                lines.append(f"止損：{stop} | 目標一：{t1} | 目標二：{t2} | 風報比：{rr_str}")
+                lines.append(f"型態：下跌{decline_str} | 築底{base_days}天 | "
+                              f"{higher_lows}個HL | 量縮{vol_cont_str} | 突破量{brk_vol_str}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
+                if risk_warn:
+                    lines.append(f"风险：{risk_warn}")
             else:
                 lines.append(f"🔥 {ticker} — {stype} 信号（置信度 {conf}/10）")
                 if company or sector:
@@ -195,14 +220,39 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
                 lines.append(f"均线支撑：{ma_support}")
                 lines.append(f"止损参考：{stop}{stop_pct_str}")
                 lines.append(f"突破目标：{orig_breakout} | 目标一：{t1}")
+                if reason:
+                    lines.append(f"💬 {reason}")
+            elif stype == "BOTTOM_FINDER":
+                bf_score     = s.get("score", "?")
+                decline_pct  = s.get("decline_pct")
+                base_days    = s.get("base_days", "?")
+                higher_lows  = s.get("higher_lows", "?")
+                vol_contract = s.get("vol_contract_ratio")
+                breakout_vol = s.get("breakout_vol_ratio")
+                rr           = s.get("risk_reward", "N/A")
+
+                decline_str  = f"{decline_pct:.1f}%" if isinstance(decline_pct, (int, float)) else "N/A"
+                vol_cont_str = f"{vol_contract:.0f}%" if isinstance(vol_contract, (int, float)) else "N/A"
+                brk_vol_str  = f"{breakout_vol:.1f}x" if isinstance(breakout_vol, (int, float)) else "N/A"
+                rr_str       = f"{rr:.1f}:1" if isinstance(rr, (int, float)) else str(rr)
+
+                lines.append(f"🏔 {ticker} — 底部反轉關注（評分 {bf_score}/100）（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"關注區間：{entry}")
+                lines.append(f"止損參考：{stop} | 目標一：{t1} | 風報比：{rr_str}")
+                lines.append(f"型態：下跌{decline_str} | 築底{base_days}天 | "
+                              f"{higher_lows}個HL | 量縮{vol_cont_str} | 突破量{brk_vol_str}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
             else:
                 lines.append(f"👀 {ticker} — {stype} 关注（置信度 {conf}/10）")
                 if company or sector:
                     lines.append(f"公司：{company}（{sector}）")
                 lines.append(f"关注区间：{entry}")
                 lines.append(f"止损参考：{stop} | 目标一：{t1}")
-            if reason:
-                lines.append(f"💬 {reason}" if stype == "VCP_CHEAT_ENTRY" else f"逻辑：{reason}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
             lines.append("⚠️ 大盘风险较高，建议等待更好入场时机")
             lines.append("---")
         lines.append("")
