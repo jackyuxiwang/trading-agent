@@ -67,19 +67,24 @@ def _save_cache(name: str, data: dict) -> None:
 
 
 def _fetch_closes(symbol: str, period: str = "30d") -> pd.Series:
-    """获取指定 symbol 的收盘价序列，降序排列（最新在前）。"""
+    """获取指定 symbol 的收盘价序列，已 dropna（yfinance 偶尔返回 NaN 行）。"""
     df = yf.Ticker(symbol).history(period=period)
     if df.empty:
         raise RuntimeError(f"yfinance 返回空数据: {symbol}")
-    return df["Close"]
+    closes = df["Close"].dropna()
+    if closes.empty:
+        raise RuntimeError(f"yfinance 收盘价全为 NaN: {symbol}")
+    return closes
 
 
 def _pct_change(series: pd.Series, n: int) -> float:
-    """计算最近 n 个交易日的累计涨跌幅（%）。"""
+    """计算最近 n 个交易日的累计涨跌幅（%）。NaN 值已在 _fetch_closes 中剔除。"""
     if len(series) < n + 1:
         raise RuntimeError(f"数据不足 {n+1} 条，无法计算 {n} 日涨跌幅")
-    latest = series.iloc[-1]
-    base = series.iloc[-(n + 1)]
+    latest = float(series.iloc[-1])
+    base   = float(series.iloc[-(n + 1)])
+    if base == 0:
+        raise RuntimeError(f"基准价为 0，无法计算涨跌幅")
     return round((latest - base) / base * 100, 2)
 
 
@@ -150,8 +155,8 @@ def get_market_env() -> dict:
     spy_change_3d = _pct_change(spy_closes, 3)
     spy_change_5d = _pct_change(spy_closes, 5)
 
-    ma20 = spy_closes.iloc[-20:].mean()
-    spy_latest = spy_closes.iloc[-1]
+    ma20 = spy_closes.iloc[-20:].dropna().mean()
+    spy_latest = float(spy_closes.iloc[-1])
     if spy_latest > ma20 * 1.001:
         spy_trend = "up"
     elif spy_latest < ma20 * 0.999:

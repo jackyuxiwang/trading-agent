@@ -267,7 +267,7 @@ def score(candidates: list) -> list:
     total   = len(candidates)
     signals = []
     skipped = 0
-    stooq_requests = 0
+    polygon_requests = 0
 
     print(f"[vcp_scorer] 开始 VCP 评分，共 {total} 只候选")
     print(f"  触发条件: volatility_contraction=True & drawdown<{VCP_MAX_DRAWDOWN}% & score>={VCP_MIN_SCORE}")
@@ -288,9 +288,9 @@ def score(candidates: list) -> list:
         df = _df_from_cache(stock)
 
         if df is None:
-            # 缓存数据不足，从 Stooq 重新拉取
+            # 缓存数据不足，从 Polygon 重新拉取
             df = _get_history_stooq(ticker, days=60)
-            stooq_requests += 1
+            polygon_requests += 1
             if df.empty:
                 skipped += 1
                 continue
@@ -374,7 +374,7 @@ def score(candidates: list) -> list:
 
     print(f"\n[vcp_scorer] 完成")
     print(f"  检测: {total} 只  VCP信号: {len(signals)} 个  跳过: {skipped} 只  "
-          f"Stooq请求: {stooq_requests} 次")
+          f"Polygon請求: {polygon_requests} 次")
 
     if signals:
         print()

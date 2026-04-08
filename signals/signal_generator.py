@@ -3,7 +3,9 @@ signal_generator.py — Claude API 综合分析，生成最终交易信号
 
 流程：
   1. 合并 EP + VCP + BullFlag + Weinstein 信号，去重
-  2. 并发调用 claude-sonnet-4-6（最多5个并发），大盘风险状态注入 prompt
+  2. 并发调用 claude-sonnet-4-6（最多3个并发），大盘风险状态注入 prompt
+     - 529 Overloaded 时 exponential backoff 重试（10/20/30s），最多3次
+     - 3次均失败则降级到 claude-haiku-4-5
      - risk_on=True:  action 可以是 BUY / WATCH / SKIP
      - risk_on=False: action 可以是 BUY_RISKY / WATCH / SKIP
   3. 保留 BUY / BUY_RISKY / WATCH，按 confidence 降序
@@ -24,8 +26,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 load_dotenv()
 
-MODEL      = "claude-sonnet-4-6"
-API_DELAY  = 0.5   # 秒，避免 Claude API 限速
+MODEL       = "claude-sonnet-4-6"
+MODEL_HAIKU = "claude-haiku-4-5-20251001"   # 529 降級備用
+API_DELAY   = 0.5   # 秒，避免 Claude API 限速
+
+# 529 重試設定
+RETRY_MAX      = 3
+RETRY_WAITS    = [10, 20, 30]   # 每次重試前等待秒數（exponential backoff）
 
 SYSTEM_PROMPT = """你是一个基于 Minervini/Qullamaggie/O'Neil 交易体系的股票信号分析师。
 你的任务是评估候选股票是否值得买入，给出具体的买入区间、止损位和止盈目标。
@@ -229,37 +236,61 @@ def _build_prompt(stock: dict, market_env: dict) -> str:
 
 def _call_claude(client: anthropic.Anthropic, prompt: str, ticker: str) -> Optional[dict]:
     """
-    调用 Claude API，解析返回的 JSON。
-    解析失败时返回 None。
+    調用 Claude API，解析返回的 JSON。
+    遇到 529 Overloaded 時 exponential backoff 重試（最多 3 次），
+    3 次均失敗則降級到 claude-haiku 再試一次。
+    解析失敗時返回 None。
     """
-    try:
+    def _do_call(model: str) -> Optional[dict]:
         message = client.messages.create(
-            model=MODEL,
+            model=model,
             max_tokens=512,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
-
-        # 提取 JSON（防止 Claude 额外输出 markdown 代码块）
         if "```" in raw:
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
             raw = raw.strip()
-
         result = json.loads(raw)
-        result["ticker"] = ticker   # 确保 ticker 一致
+        result["ticker"] = ticker
         return result
 
-    except json.JSONDecodeError as e:
-        print(f"  [warn] {ticker} JSON 解析失败: {e}")
-        return None
-    except anthropic.APIError as e:
-        print(f"  [warn] {ticker} Claude API 错误: {e}")
-        return None
+    # 主模型重試（最多 RETRY_MAX 次）
+    for attempt in range(1, RETRY_MAX + 1):
+        try:
+            return _do_call(MODEL)
+
+        except json.JSONDecodeError as e:
+            print(f"  [warn] {ticker} JSON 解析失敗: {e}")
+            return None   # JSON 錯誤不需要重試
+
+        except anthropic.APIStatusError as e:
+            if e.status_code == 529:
+                wait = RETRY_WAITS[attempt - 1]
+                print(f"  [warn] {ticker} Claude 529 Overloaded (attempt {attempt}/{RETRY_MAX})，"
+                      f"等待 {wait}s 後重試…")
+                time.sleep(wait)
+                continue
+            print(f"  [warn] {ticker} Claude API 錯誤 {e.status_code}: {e}")
+            return None
+
+        except anthropic.APIError as e:
+            print(f"  [warn] {ticker} Claude API 錯誤: {e}")
+            return None
+
+        except Exception as e:
+            print(f"  [warn] {ticker} 未知錯誤: {e}")
+            return None
+
+    # 主模型 3 次全敗 → 降級到 haiku
+    print(f"  [warn] {ticker} 主模型 {RETRY_MAX} 次重試均失敗，降級到 {MODEL_HAIKU}")
+    try:
+        return _do_call(MODEL_HAIKU)
     except Exception as e:
-        print(f"  [warn] {ticker} 未知错误: {e}")
+        print(f"  [warn] {ticker} haiku 降級也失敗: {e}")
         return None
 
 
@@ -347,8 +378,8 @@ def generate(ep_signals: list, vcp_signals: list, market_env: dict,
         raise EnvironmentError("ANTHROPIC_API_KEY 未设置，请检查 .env 文件")
     client = anthropic.Anthropic(api_key=api_key)
 
-    # ── 并发分析（每只独立线程，最多5个并发）─────────────────────────────────
-    MAX_WORKERS  = 5
+    # ── 并发分析（每只独立线程，最多3个并发）─────────────────────────────────
+    MAX_WORKERS  = 3
     t_parallel   = time.time()
     raw_results  = {}   # index → (stock, result, elapsed)
 
@@ -371,7 +402,7 @@ def generate(ep_signals: list, vcp_signals: list, market_env: dict,
 
         return idx, ticker, stype, score, action, confidence, result, elapsed
 
-    print(f"  并发分析（max_workers={MAX_WORKERS}）…")
+    print(f"  並發分析（max_workers={MAX_WORKERS}，529 自動重試最多 {RETRY_MAX} 次）…")
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(_analyze_one, (i, s)): i
                    for i, s in enumerate(candidates)}
