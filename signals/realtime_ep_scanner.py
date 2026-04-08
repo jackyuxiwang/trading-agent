@@ -25,6 +25,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from data.polygon_snapshot import get_batch_snapshots, get_gainers
+from signals.fib_entry_calculator import calculate_fib_entry
 
 # ── 閾值 ─────────────────────────────────────────────────────────────────────
 MIN_PREMARKET_CHANGE_PCT = 5.0    # 盤前漲幅門檻（%）
@@ -127,6 +128,11 @@ def _build_signal(snap: dict, vol_ma: Optional[float] = None,
     market_status = snap.get("market_status", "")
     action = _classify_action(gap_pct, vol_ratio, close_pos, market_status)
 
+    # ── Fibonacci 入場分析 ────────────────────────────────────────────────────
+    # 盤前用當前價作為缺口高點；開盤後用實際開盤價
+    pm_high = open_p if (phase == "opening" and open_p > prev_close) else price
+    fib = calculate_fib_entry(prev_close, pm_high, current_price=price) if prev_close > 0 else None
+
     return {
         "ticker":         ticker,
         "signal_type":    f"{phase.upper()}_EP",
@@ -140,6 +146,7 @@ def _build_signal(snap: dict, vol_ma: Optional[float] = None,
         "vol_ratio":      vol_ratio,
         "close_position": close_pos,
         "market_status":  market_status,
+        "fib":            fib,
         "scanned_at":     datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 

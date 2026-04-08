@@ -32,6 +32,7 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent))
 
 from output.discord_alert import send_report
+from signals.fib_entry_calculator import fmt_fib_summary
 from signals.realtime_ep_scanner import WATCHLIST, scan_opening, scan_premarket
 
 # ── 設定 ──────────────────────────────────────────────────────────────────────
@@ -61,18 +62,24 @@ def _fmt_discord_premarket(signals: list, scan_time: str) -> str:
         lines.append("")
         lines.append("**直接關注：**")
         for s in buy_sigs[:8]:
+            fib_line = fmt_fib_summary(s.get("fib"))
             lines.append(
                 f"  `{s['ticker']:<6}` +{s['gap_pct']:.1f}%  "
                 f"${s['price']}  vol={s['volume']:,}"
             )
+            if fib_line:
+                lines.append(f"    ↳ {fib_line}")
 
     if watch_sigs:
         lines.append("")
         lines.append("**觀察：**")
         for s in watch_sigs[:6]:
+            fib_line = fmt_fib_summary(s.get("fib"))
             lines.append(
                 f"  `{s['ticker']:<6}` +{s['gap_pct']:.1f}%  ${s['price']}"
             )
+            if fib_line:
+                lines.append(f"    ↳ {fib_line}")
 
     return "\n".join(lines)
 
@@ -98,6 +105,9 @@ def _fmt_discord_opening(signals: list, scan_time: str) -> str:
                 f"  `{s['ticker']:<6}` gap={s['gap_pct']:+.1f}%  "
                 f"${s['price']}{vr}{cp}"
             )
+            fib_line = fmt_fib_summary(s.get("fib"))
+            if fib_line:
+                lines.append(f"    ↳ {fib_line}")
 
     if watch_sigs:
         lines.append("")
@@ -106,6 +116,9 @@ def _fmt_discord_opening(signals: list, scan_time: str) -> str:
             lines.append(
                 f"  `{s['ticker']:<6}` gap={s['gap_pct']:+.1f}%  ${s['price']}"
             )
+            fib_line = fmt_fib_summary(s.get("fib"))
+            if fib_line:
+                lines.append(f"    ↳ {fib_line}")
 
     if fade_sigs:
         lines.append("")
