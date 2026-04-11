@@ -5,17 +5,19 @@ realtime_ep_scanner.py — 即時 EP 掃描器（盤前 + 開盤）
 
 掃描流程：
   盤前（4:00–9:30 ET）：
-    1. Polygon /v2/snapshot gainers → 漲幅 ≥ MIN_PREMARKET_CHANGE_PCT
-    2. 若 gainers 為空（市場未開）→ fallback 到靜態關注清單
-    3. 批量 /v3/snapshot 取盤前數據 → 進一步過濾
-    4. 返回 PREMARKET_EP 候選列表
+    來源1：Polygon /v2/snapshot gainers → 漲幅榜
+    來源2：最新 fundamental_candidates_*.json 快取（~300 只基本面候選）
+    來源3：靜態 WATCHLIST（手動添加的高關注 ticker）
+    合併去重後批量 /v3/snapshot，篩選 premarket_change_pct ≥ min_gap_pct
+
+  Rate limit 估算（Polygon Starter = 5 calls/min）：
+    gainers 1 次 + fundamental 2 次（300只/250批）+ watchlist 1 次 = 4 次/輪 ✓
 
   開盤後（9:30–10:30 ET）：
-    1. 批量查詢盤前候選 + 關注清單的即時快照
-    2. 計算開盤跳空幅度、成交量比、收盤位置
-    3. 分類 BUY / WATCH / FADE 信號
+    批量查詢盤前候選 + WATCHLIST，BUY / WATCH / FADE 分類
 """
 
+import json
 import sys
 import time
 from datetime import datetime
@@ -26,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from data.polygon_snapshot import get_batch_snapshots, get_gainers
 from signals.fib_entry_calculator import calculate_fib_entry
+
+CACHE_DIR = Path(__file__).parent.parent / "data" / "cache"
 
 # ── 閾值 ─────────────────────────────────────────────────────────────────────
 MIN_PREMARKET_CHANGE_PCT = 5.0    # 盤前漲幅門檻（%）
@@ -42,14 +46,43 @@ RVOL_WATCH_MIN = 1.5  # 量比 ≥ 1.5 → WATCH
 CLOSE_POSITION_BUY  = 0.6   # 收盤在當日價格幅度的 60% 以上 → 強
 CLOSE_POSITION_FADE = 0.4   # 收盤在當日價格幅度的 40% 以下 → 弱（FADE）
 
-# 靜態關注清單（無漲幅榜數據時使用）
+# 靜態關注清單（手動維護，每輪必查，不依賴漲幅榜排名）
+# 包含：半導體光電、高動量個股、長期追蹤標的
 WATCHLIST: list = [
-    "NVDA", "AMD", "META", "GOOGL", "MSFT", "AMZN", "TSLA",
-    "AAPL", "NFLX", "PLTR", "SMCI", "MSTR", "COIN", "HOOD",
+    # 大型科技（流動性基準）
+    "NVDA", "AMD", "META", "GOOGL", "MSFT", "AMZN", "TSLA", "AAPL",
+    # 高動量 / 波動性強
+    "NFLX", "PLTR", "SMCI", "MSTR", "COIN", "HOOD",
+    # 光電 / 光纖 / 半導體（容易被漲幅榜排擠的優質標的）
+    "GLW", "AAOI", "AEHR", "LITE", "COHR", "MRVL", "FNSR",
+    # 生技 / 醫療器械
+    "RXRX", "EXAS", "INMD",
 ]
 
 
 # ── 內部工具 ──────────────────────────────────────────────────────────────────
+
+def _load_fund_cache_tickers() -> list:
+    """
+    讀取最新的 fundamental_candidates_*.json 快取，返回 ticker 列表。
+    找不到快取時返回空列表（不影響其他來源）。
+    """
+    pattern = "fundamental_candidates_*.json"
+    files = sorted(CACHE_DIR.glob(pattern))   # 按文件名升序 → 最新日期在末尾
+    if not files:
+        print("  [fund_cache] 找不到 fundamental_candidates 快取，跳過來源2")
+        return []
+
+    latest = files[-1]
+    try:
+        data = json.loads(latest.read_text(encoding="utf-8"))
+        tickers = [item["ticker"] for item in data if item.get("ticker")]
+        print(f"  [fund_cache] 載入 {latest.name}，共 {len(tickers)} 只")
+        return tickers
+    except Exception as e:
+        print(f"  [fund_cache] 讀取失敗: {e}")
+        return []
+
 
 def _close_position(open_p: float, high: float, low: float, close: float) -> Optional[float]:
     """計算收盤在當日振幅中的相對位置（0 = 最低，1 = 最高）。"""
@@ -158,52 +191,60 @@ def scan_premarket(
     min_change_pct: float = MIN_PREMARKET_CHANGE_PCT,
 ) -> list:
     """
-    盤前 EP 掃描（4:00–9:30 ET）。
+    盤前 EP 掃描（4:00–9:30 ET）。三個來源合併，批量查詢後統一過濾。
 
-    流程：
-      1. /v2/snapshot gainers → 初篩漲幅 ≥ min_change_pct
-      2. 合併 extra_tickers + WATCHLIST（靜態關注清單）
-      3. 批量 /v3/snapshot 取即時盤前數據
-      4. 再次過濾：盤前漲幅 ≥ min_change_pct，股價 ≥ MIN_PRICE
+    來源1：Polygon /v2/snapshot gainers（漲幅榜，不受數量限制問題影響）
+    來源2：最新 fundamental_candidates_*.json 快取（~300 只基本面候選）
+    來源3：靜態 WATCHLIST（手動維護，每輪必查）
+
+    Rate limit：gainers 1次 + fund 2次（300/250批）= 共3次/輪 < 5/min ✓
 
     Args:
-        extra_tickers:  額外追蹤的 ticker 列表（如昨日候選）
+        extra_tickers:  額外追蹤的 ticker（如昨日盤前候選，由 main_realtime 傳入）
         min_change_pct: 盤前漲幅門檻（%），默認 5.0
 
     Returns:
-        信號列表，每項為包含 ticker, action, gap_pct, price, volume 等字段的 dict
+        信號列表，每項包含 ticker, action, gap_pct, price, volume, fib 等字段
     """
     print(f"[realtime_ep] scan_premarket  min_change={min_change_pct}%")
 
-    # Step 1: 漲幅榜（盤中即時）
+    # ── 來源1：漲幅榜 ────────────────────────────────────────────────────────
     gainers = get_gainers(min_change_pct=min_change_pct)
-    gainer_tickers = [g["ticker"] for g in gainers]
-    print(f"  [info] gainers={len(gainer_tickers)} 只")
+    gainer_set = {g["ticker"] for g in gainers}
+    print(f"  [來源1] gainers={len(gainer_set)} 只")
 
-    # Step 2: 合併關注清單
-    watch_set = set(gainer_tickers)
+    # ── 來源2：fundamental_candidates 快取 ───────────────────────────────────
+    fund_tickers = _load_fund_cache_tickers()
+    fund_set = set(fund_tickers)
+    print(f"  [來源2] fund_cache={len(fund_set)} 只")
+
+    # ── 來源3：靜態 WATCHLIST + extra_tickers ────────────────────────────────
+    watch_set = set(WATCHLIST)
     if extra_tickers:
         watch_set.update(extra_tickers)
-    watch_set.update(WATCHLIST)
-    all_tickers = list(watch_set)
-    print(f"  [info] 合併後共 {len(all_tickers)} 只待查詢")
+    print(f"  [來源3] watchlist={len(watch_set)} 只（含 extra={len(extra_tickers or [])} 只）")
 
-    # Step 3: 批量快照
+    # ── 合併去重 ──────────────────────────────────────────────────────────────
+    all_tickers = list(gainer_set | fund_set | watch_set)
+    print(f"  [合併] 共 {len(all_tickers)} 只待查詢"
+          f"（gainers {len(gainer_set)} + fund {len(fund_set)} + watch {len(watch_set)}，去重後）")
+
     if not all_tickers:
         print("  [warn] 無 ticker 可查，返回空列表")
         return []
 
+    # ── 批量快照（每批 250 只，約 1-2 次 API call）────────────────────────────
     snapshots = get_batch_snapshots(all_tickers)
-    snap_map  = {s["ticker"]: s for s in snapshots}
 
-    # Step 4: 過濾 + 建信號
+    # ── 過濾 + 建信號 ─────────────────────────────────────────────────────────
     signals = []
+    source_log: dict = {}   # ticker → 來自哪個來源（debug 用）
+
     for snap in snapshots:
         ticker     = snap["ticker"]
         price      = snap["price"]
         pre_pct    = snap.get("premarket_change_pct", 0.0)
         change_pct = snap.get("change_pct", 0.0)
-        volume     = snap.get("volume", 0)
 
         # 優先用盤前漲幅，若為 0 則用日漲幅（gainers 場景）
         effective_pct = pre_pct if abs(pre_pct) >= 1.0 else change_pct
@@ -213,13 +254,27 @@ def scan_premarket(
         if abs(effective_pct) < min_change_pct:
             continue
 
+        # 記錄來源（可能同時屬於多個來源）
+        sources = []
+        if ticker in gainer_set: sources.append("gainers")
+        if ticker in fund_set:   sources.append("fund")
+        if ticker in watch_set:  sources.append("watch")
+        source_log[ticker] = "+".join(sources) if sources else "unknown"
+
         sig = _build_signal(snap, vol_ma=None, phase="premarket")
         sig["gap_pct"] = round(effective_pct, 2)
+        sig["source"]  = source_log[ticker]
         signals.append(sig)
 
-    # 按漲幅降序排列
+    # 按漲幅降序
     signals.sort(key=lambda s: abs(s["gap_pct"]), reverse=True)
-    print(f"  [info] scan_premarket 返回 {len(signals)} 個信號")
+
+    # 來源分佈統計
+    from_gainers = sum(1 for s in signals if "gainers" in s.get("source", ""))
+    from_fund    = sum(1 for s in signals if "fund"    in s.get("source", ""))
+    from_watch   = sum(1 for s in signals if "watch"   in s.get("source", ""))
+    print(f"  [info] scan_premarket 返回 {len(signals)} 個信號"
+          f"（gainers發現={from_gainers} fund發現={from_fund} watch發現={from_watch}）")
     return signals
 
 
@@ -248,8 +303,9 @@ def scan_opening(
     if not tickers:
         return []
 
-    # 合併靜態關注清單
-    all_tickers = list(set(tickers) | set(WATCHLIST))
+    # 合併：傳入的盤前候選 + 靜態 WATCHLIST + fundamental 快取
+    fund_tickers = _load_fund_cache_tickers()
+    all_tickers = list(set(tickers) | set(WATCHLIST) | set(fund_tickers))
     print(f"[realtime_ep] scan_opening {len(all_tickers)} tickers  min_gap={min_gap_pct}%")
 
     snapshots = get_batch_snapshots(all_tickers)

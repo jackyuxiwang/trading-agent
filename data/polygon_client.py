@@ -21,6 +21,10 @@ load_dotenv()
 BASE_URL = "https://api.polygon.io"
 CACHE_DIR = Path(__file__).parent / "cache"
 
+# 統一快取天數：所有 detector 無論傳入多少 days，都命中同一份快取
+# BottomFinder 需要 730 天；其他 detector 需要更短但共用此快取，取尾部 N 行即可
+MAX_CACHE_DAYS = 730
+
 
 def _get_api_key() -> str:
     key = os.getenv("POLYGON_API_KEY", "")
@@ -157,46 +161,11 @@ def get_grouped_daily(date: Optional[str] = None) -> pd.DataFrame:
     return df
 
 
-def get_history(ticker: str, days: int = 60,
-                end_date: Optional[str] = None) -> pd.DataFrame:
-    """
-    获取单只股票最近 N 天的日线 OHLCV 数据。
-
-    Args:
-        ticker:   股票代码，如 "AAPL"
-        days:     往前取多少个日历天（实际交易日更少）
-        end_date: 截止日期 "YYYY-MM-DD"，默认取最近交易日（回测时传入指定日期）
-
-    Returns:
-        DataFrame，列: date, ticker, open, high, low, close, volume, vwap, trades
-    """
-    print(f"[polygon] get_history ticker={ticker} days={days}"
-          + (f" end_date={end_date}" if end_date else ""))
-
-    to_date = end_date if end_date else _last_weekday()
-    from_date = (datetime.strptime(to_date, "%Y-%m-%d") - timedelta(days=days)).strftime("%Y-%m-%d")
-
-    cache_key = f"history_{ticker}_{from_date}_{to_date}"
-    cached = _load_cache(cache_key)
-    if cached is not None:
-        results = cached
-    else:
-        url = f"{BASE_URL}/v2/aggs/ticker/{ticker}/range/1/day/{from_date}/{to_date}"
-        data = _request(url, params={
-            "apiKey": _get_api_key(),
-            "adjusted": "true",
-            "sort": "asc",
-            "limit": 500,
-        })
-
-        if not data.get("resultsCount"):
-            print(f"  [warn] {ticker} 在 {from_date}~{to_date} 无数据")
-            return pd.DataFrame()
-
-        results = data.get("results", [])
-        _save_cache(cache_key, results)
-
+def _build_history_df(results: list, ticker: str) -> pd.DataFrame:
+    """將 Polygon aggregates results list 轉為標準 DataFrame。"""
     df = pd.DataFrame(results)
+    if df.empty:
+        return df
 
     col_map = {
         "t": "timestamp",
@@ -210,7 +179,6 @@ def get_history(ticker: str, days: int = 60,
     }
     df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
 
-    # timestamp (ms) → date 字符串
     if "timestamp" in df.columns:
         df["date"] = pd.to_datetime(df["timestamp"], unit="ms").dt.strftime("%Y-%m-%d")
         df = df.drop(columns=["timestamp"])
@@ -219,10 +187,70 @@ def get_history(ticker: str, days: int = 60,
 
     keep = [c for c in ["date", "ticker", "open", "high", "low", "close", "volume", "vwap", "trades"]
             if c in df.columns]
-    df = df[keep].reset_index(drop=True)
+    return df[keep].reset_index(drop=True)
 
-    print(f"  [info] get_history 完成，共 {len(df)} 条记录（{df['date'].iloc[0]} ~ {df['date'].iloc[-1]}）")
-    return df
+
+def get_history(ticker: str, days: int = 60,
+                end_date: Optional[str] = None) -> pd.DataFrame:
+    """
+    获取单只股票最近 N 天的日线 OHLCV 数据。
+
+    快取策略：無論 days 為何值，一律以 MAX_CACHE_DAYS（730）天做為快取 key，
+    確保所有 detector 共用同一份快取檔案，避免重複 API 請求。
+    返回時取最後 days 行（df.tail(days)）。
+
+    Args:
+        ticker:   股票代码，如 "AAPL"
+        days:     返回多少個日曆天的資料（實際交易日更少）
+        end_date: 截止日期 "YYYY-MM-DD"，默认取最近交易日（回测时传入指定日期）
+
+    Returns:
+        DataFrame，列: date, ticker, open, high, low, close, volume, vwap, trades
+    """
+    print(f"[polygon] get_history ticker={ticker} days={days}"
+          + (f" end_date={end_date}" if end_date else ""))
+
+    to_date = end_date if end_date else _last_weekday()
+
+    # 統一快取範圍：始終用 MAX_CACHE_DAYS 計算 from_date，
+    # 不同 days 的 detector 命中同一份 JSON 快取
+    cache_days = max(days, MAX_CACHE_DAYS)
+    from_date  = (datetime.strptime(to_date, "%Y-%m-%d")
+                  - timedelta(days=cache_days)).strftime("%Y-%m-%d")
+
+    cache_key = f"history_{ticker}_{from_date}_{to_date}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        df = _build_history_df(cached, ticker)
+        if df.empty:
+            return df
+        result = df.tail(days).reset_index(drop=True)
+        print(f"  [info] get_history 快取命中，返回 {len(result)} 條記錄")
+        return result
+
+    url = f"{BASE_URL}/v2/aggs/ticker/{ticker}/range/1/day/{from_date}/{to_date}"
+    data = _request(url, params={
+        "apiKey": _get_api_key(),
+        "adjusted": "true",
+        "sort": "asc",
+        "limit": 50000,
+    })
+
+    if not data.get("resultsCount"):
+        print(f"  [warn] {ticker} 在 {from_date}~{to_date} 无数据")
+        return pd.DataFrame()
+
+    results = data.get("results", [])
+    _save_cache(cache_key, results)
+
+    df = _build_history_df(results, ticker)
+    if df.empty:
+        return df
+
+    result = df.tail(days).reset_index(drop=True)
+    print(f"  [info] get_history 完成，共 {len(df)} 條記錄（{df['date'].iloc[0]} ~ "
+          f"{df['date'].iloc[-1]}），返回最後 {len(result)} 條")
+    return result
 
 
 # ── 测试入口 ──────────────────────────────────────────────────────────────────

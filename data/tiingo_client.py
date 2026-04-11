@@ -26,6 +26,9 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 BASE_URL  = "https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start}/{end}"
 CACHE_DIR = Path(__file__).parent / "cache"
 
+# 統一快取天數（交易日）：始終拉取此量以確保 Weinstein(200天) 等長週期 detector 命中快取
+MAX_CACHE_TRADING_DAYS = 250
+
 
 def _get_api_key() -> str:
     key = os.getenv("POLYGON_API_KEY", "")
@@ -59,7 +62,9 @@ def get_history(ticker: str, days: int = 60) -> pd.DataFrame:
         try:
             raw = json.loads(cache_p.read_text(encoding="utf-8"))
             df  = pd.DataFrame(raw)
-            if not df.empty and len(df) >= 2:
+            # 快取必須有足夠的行數滿足本次請求
+            # （避免短週期 detector 先寫入少量數據，長週期 detector 誤用）
+            if not df.empty and len(df) >= min(days, MAX_CACHE_TRADING_DAYS - 5):
                 return df.tail(days).reset_index(drop=True)
         except Exception:
             pass
@@ -67,7 +72,9 @@ def get_history(ticker: str, days: int = 60) -> pd.DataFrame:
     # ── 请求 Polygon aggregates ───────────────────────────────────────────────
     try:
         api_key    = _get_api_key()
-        start_date = (datetime.today() - timedelta(days=int(days * 1.6) + 10)).strftime("%Y-%m-%d")
+        # 始終拉取 MAX_CACHE_TRADING_DAYS，確保快取夠大給所有 detector 使用
+        fetch_days = max(days, MAX_CACHE_TRADING_DAYS)
+        start_date = (datetime.today() - timedelta(days=int(fetch_days * 1.6) + 10)).strftime("%Y-%m-%d")
         end_date   = today
 
         url    = BASE_URL.format(ticker=ticker.upper(), start=start_date, end=end_date)

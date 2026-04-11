@@ -62,10 +62,11 @@ def _fmt_discord_premarket(signals: list, scan_time: str) -> str:
         lines.append("")
         lines.append("**直接關注：**")
         for s in buy_sigs[:8]:
+            src = f" [{s['source']}]" if s.get("source") else ""
             fib_line = fmt_fib_summary(s.get("fib"))
             lines.append(
                 f"  `{s['ticker']:<6}` +{s['gap_pct']:.1f}%  "
-                f"${s['price']}  vol={s['volume']:,}"
+                f"${s['price']}  vol={s['volume']:,}{src}"
             )
             if fib_line:
                 lines.append(f"    ↳ {fib_line}")
@@ -74,9 +75,10 @@ def _fmt_discord_premarket(signals: list, scan_time: str) -> str:
         lines.append("")
         lines.append("**觀察：**")
         for s in watch_sigs[:6]:
+            src = f" [{s['source']}]" if s.get("source") else ""
             fib_line = fmt_fib_summary(s.get("fib"))
             lines.append(
-                f"  `{s['ticker']:<6}` +{s['gap_pct']:.1f}%  ${s['price']}"
+                f"  `{s['ticker']:<6}` +{s['gap_pct']:.1f}%  ${s['price']}{src}"
             )
             if fib_line:
                 lines.append(f"    ↳ {fib_line}")

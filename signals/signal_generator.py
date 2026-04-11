@@ -43,42 +43,33 @@ SYSTEM_PROMPT = """你是一个基于 Minervini/Qullamaggie/O'Neil 交易体系�
 
 def _merge_signals(ep_signals: list, vcp_signals: list,
                    bf_signals: list, ws_signals: list,
-                   bottom_signals: list = None) -> list:
+                   bottom_signals: list = None,
+                   post_ep_signals: list = None,
+                   cup_signals: list = None,
+                   mr_signals: list = None) -> list:
     """
-    合并 EP / VCP / Bull Flag / Weinstein / Bottom Finder 信号，
+    合并 EP / VCP / Bull Flag / Weinstein / Bottom Finder /
+    Post-EP Tight / Cup Handle / Mean Reversion 信号，
     同一股票只保留得分更高的那条。统一映射到 signal_score 字段。
     """
     merged: dict = {}  # ticker → signal dict
 
-    for s in ep_signals:
+    def _put(s: dict, score_key: str):
         ticker = s.get("ticker", "")
-        s      = {**s, "signal_score": s.get("ep_score", 0)}
+        if not ticker:
+            return
+        s = {**s, "signal_score": s.get(score_key, 0)}
         if ticker not in merged or s["signal_score"] > merged[ticker]["signal_score"]:
             merged[ticker] = s
 
-    for s in vcp_signals:
-        ticker = s.get("ticker", "")
-        s      = {**s, "signal_score": s.get("vcp_score", 0)}
-        if ticker not in merged or s["signal_score"] > merged[ticker]["signal_score"]:
-            merged[ticker] = s
-
-    for s in bf_signals:
-        ticker = s.get("ticker", "")
-        s      = {**s, "signal_score": s.get("bf_score", 0)}
-        if ticker not in merged or s["signal_score"] > merged[ticker]["signal_score"]:
-            merged[ticker] = s
-
-    for s in ws_signals:
-        ticker = s.get("ticker", "")
-        s      = {**s, "signal_score": s.get("weinstein_score", 0)}
-        if ticker not in merged or s["signal_score"] > merged[ticker]["signal_score"]:
-            merged[ticker] = s
-
-    for s in (bottom_signals or []):
-        ticker = s.get("ticker", "")
-        s      = {**s, "signal_score": s.get("score", 0)}
-        if ticker not in merged or s["signal_score"] > merged[ticker]["signal_score"]:
-            merged[ticker] = s
+    for s in ep_signals:              _put(s, "ep_score")
+    for s in vcp_signals:             _put(s, "vcp_score")
+    for s in bf_signals:              _put(s, "bf_score")
+    for s in ws_signals:              _put(s, "weinstein_score")
+    for s in (bottom_signals or []):  _put(s, "score")
+    for s in (post_ep_signals or []): _put(s, "score")
+    for s in (cup_signals or []):     _put(s, "score")
+    for s in (mr_signals or []):      _put(s, "score")
 
     result = list(merged.values())
     result.sort(key=lambda x: x.get("signal_score", 0), reverse=True)
@@ -108,6 +99,12 @@ def _build_prompt(stock: dict, market_env: dict) -> str:
         score_label, score_val = "VCP评分",         stock.get("vcp_score")
     elif signal_type == "BOTTOM_FINDER":
         score_label, score_val = "底部反轉評分",     stock.get("score")
+    elif signal_type == "POST_EP_TIGHT":
+        score_label, score_val = "EP後盤整評分",     stock.get("score")
+    elif signal_type == "CUP_HANDLE":
+        score_label, score_val = "杯柄評分",         stock.get("score")
+    elif signal_type == "MEAN_REVERSION":
+        score_label, score_val = "均值回歸評分",     stock.get("score")
     else:
         score_label, score_val = "VCP评分",         stock.get("vcp_score")
 
@@ -202,7 +199,59 @@ def _build_prompt(stock: dict, market_env: dict) -> str:
                 f"重點評估：突破的有效性（量能是否足夠？）、止損是否合理？",
                 f"底部反轉型態風險較高但報酬潛力大，重點看 entry_price、stop_loss、risk_reward。",
             ]
-            if signal_type == "BOTTOM_FINDER" else []
+            if signal_type == "BOTTOM_FINDER" else
+            [
+                f"- EP後盤整型態：EP跳空後緊密整理（3–10天），量縮，伺機第二段突破",
+                f"- EP缺口日期：{stock.get('ep_date', 'N/A')}",
+                f"- EP缺口幅度：{fmt(stock.get('ep_gap_pct'), suffix='%')}",
+                f"- EP收盤價：${fmt(stock.get('ep_close'), decimals=2)}",
+                f"- 盤整天數：{stock.get('consol_days', 'N/A')} 天",
+                f"- 盤整振幅（缺口倍數）：{fmt(stock.get('amp_ratio'), suffix='x')}（越小越緊）",
+                f"- 盤整量/EP量：{fmt(stock.get('vol_ratio_to_ep'), suffix='x')}（越小越好）",
+                f"- 缺口保持：{'是' if stock.get('gap_maintained') else '否'}",
+                f"- 建議入場：${fmt(stock.get('entry_price'), decimals=2)}（盤整高點突破）",
+                f"- 建議止損：${fmt(stock.get('stop_loss'), decimals=2)}（EP開盤下方1%）",
+                f"- 預估目標：${fmt(stock.get('target_price'), decimals=2)}（EP漲幅 × 0.618）",
+                f"",
+                f"重點評估：盤整是否足夠緊密？量縮是否充分？突破時需量能配合。",
+            ]
+            if signal_type == "POST_EP_TIGHT" else
+            [
+                f"- 杯柄型態（O'Neil Cup with Handle）：",
+                f"- 杯深度：{fmt(stock.get('cup_depth_pct'), suffix='%')}（理想 15–35%）",
+                f"- 杯寬度：{stock.get('cup_length', 'N/A')} 天",
+                f"- 右側恢復：{fmt(stock.get('right_recovery_pct'), suffix='%')}（需≥85%）",
+                f"- 杯形評分（U形比）：{fmt(stock.get('u_shape_ratio'), decimals=2)}",
+                f"- 杯柄天數：{stock.get('handle_length', 'N/A')} 天",
+                f"- 柄深度比：{fmt(stock.get('handle_depth_ratio'), suffix='%')}（<50%為佳）",
+                f"- 柄部量縮：{fmt(stock.get('handle_vol_ratio'), suffix='x')}（<0.8為佳）",
+                f"- 突破量能：{fmt(stock.get('breakout_vol_ratio'), suffix='x')}（需≥1.5x）",
+                f"- 建議入場：${fmt(stock.get('entry_price'), decimals=2)}（柄高突破）",
+                f"- 建議止損：${fmt(stock.get('stop_loss'), decimals=2)}（柄低下方1%）",
+                f"- 預估目標：${fmt(stock.get('target_price'), decimals=2)}（杯深度量升）",
+                f"",
+                f"重點評估：杯形是否圓潤？柄部量縮是否充分？突破放量是否有效？",
+            ]
+            if signal_type == "CUP_HANDLE" else
+            [
+                f"- 均值回歸型態：優質股票超跌後技術面反彈機會",
+                f"- RSI(14)：{fmt(stock.get('rsi'), decimals=1)}（<30為嚴重超賣）",
+                f"- MA50偏離度：{fmt(stock.get('ma50_dev_pct'), suffix='%')}（負值=跌破MA50）",
+                f"- 超賣信號數量：{stock.get('oversold_count', 'N/A')}/5",
+                f"- 反彈信號數量：{stock.get('bounce_count', 'N/A')}/4",
+                f"- 反彈型態：{stock.get('bounce_type', 'N/A')}",
+                f"- 連跌天數：{stock.get('consec_down_days', 'N/A')} 天",
+                f"- 累計跌幅：{fmt(stock.get('recent_decline_pct'), suffix='%')}",
+                f"- 距52週低點：{fmt(stock.get('near_52w_low_pct'), suffix='%')}",
+                f"- 建議入場：${fmt(stock.get('entry_price'), decimals=2)}（當前價）",
+                f"- 建議止損：${fmt(stock.get('stop_loss'), decimals=2)}（近5日低點×0.97）",
+                f"- 目標回歸：${fmt(stock.get('target_price'), decimals=2)}（MA50）",
+                f"- 風報比：{fmt(stock.get('risk_reward'), decimals=1)}:1",
+                f"",
+                f"重點評估：反彈信號是否可靠？基本面是否支撐估值？大盤環境是否適合逆勢操作？",
+                f"注意：均值回歸策略需要嚴格止損，不宜重倉。",
+            ]
+            if signal_type == "MEAN_REVERSION" else []
         ),
         f"",
         f"基本面数据：",
@@ -340,18 +389,25 @@ def _parse_price(s: str) -> Optional[float]:
 
 def generate(ep_signals: list, vcp_signals: list, market_env: dict,
              bf_signals: list = None, ws_signals: list = None,
-             bottom_signals: list = None) -> list:
+             bottom_signals: list = None,
+             post_ep_signals: list = None,
+             cup_signals: list = None,
+             mr_signals: list = None) -> list:
     """
-    综合 EP + VCP + Bull Flag + Weinstein + Bottom Finder 信号，
+    综合 EP + VCP + Bull Flag + Weinstein + Bottom Finder +
+    Post-EP Tight + Cup Handle + Mean Reversion 信号，
     调用 Claude 分析，返回最终信号列表。
 
     Args:
-        ep_signals:     ep_detector.detect() 的结果
-        vcp_signals:    vcp_scorer.score() 的结果
-        market_env:     market_env_client.get_market_env() 的结果
-        bf_signals:     bull_flag_detector.detect() 的结果（可选）
-        ws_signals:     weinstein_detector.detect() 的结果（可选）
-        bottom_signals: bottom_finder_detector.detect() 的结果（可选）
+        ep_signals:      ep_detector.detect() 的结果
+        vcp_signals:     vcp_scorer.score() 的结果
+        market_env:      market_env_client.get_market_env() 的结果
+        bf_signals:      bull_flag_detector.detect() 的结果（可选）
+        ws_signals:      weinstein_detector.detect() 的结果（可选）
+        bottom_signals:  bottom_finder_detector.detect() 的结果（可选）
+        post_ep_signals: post_ep_tight_detector.detect() 的结果（可选）
+        cup_signals:     cup_handle_detector.detect() 的结果（可选）
+        mr_signals:      mean_reversion_detector.detect() 的结果（可选）
 
     Returns:
         action="BUY"/"BUY_RISKY" 的信号列表，按 confidence 降序
@@ -359,13 +415,18 @@ def generate(ep_signals: list, vcp_signals: list, market_env: dict,
     # ── 合并去重 ──────────────────────────────────────────────────────────────
     candidates = _merge_signals(ep_signals, vcp_signals,
                                 bf_signals or [], ws_signals or [],
-                                bottom_signals or [])
+                                bottom_signals or [],
+                                post_ep_signals or [],
+                                cup_signals or [],
+                                mr_signals or [])
     total      = len(candidates)
 
     print(f"[signal_generator] 开始 Claude 分析")
     print(f"  EP信号: {len(ep_signals)}  VCP信号: {len(vcp_signals)}"
           f"  BullFlag信号: {len(bf_signals or [])}  Weinstein信号: {len(ws_signals or [])}"
-          f"  BottomFinder信号: {len(bottom_signals or [])}  合并后: {total} 只")
+          f"  BottomFinder信号: {len(bottom_signals or [])}"
+          f"  PostEP信号: {len(post_ep_signals or [])}  CupHandle信号: {len(cup_signals or [])}"
+          f"  MeanReversion信号: {len(mr_signals or [])}  合并后: {total} 只")
     print(f"  模型: {MODEL}")
 
     if total == 0:

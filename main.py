@@ -10,7 +10,7 @@ main.py — Trading Agent 主入口
 import argparse
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # 确保项目根目录在 sys.path
@@ -35,6 +35,80 @@ def _done(t0: float, label: str = "") -> float:
     elapsed = time.time() - t0
     print(f"  ✓ {label}耗时: {elapsed:.1f}s")
     return elapsed
+
+
+# ── 歷史數據預載 ──────────────────────────────────────────────────────────────
+
+def _preload_history(tickers: list, end_date: str = None) -> dict:
+    """
+    預先拉取所有 ticker 的 730 天歷史數據，寫入 polygon_client 快取。
+    之後各 detector 調用 get_history() 時直接命中快取，零 API call。
+
+    節流：每 5 個 API 請求暫停 61 秒（Polygon 5 calls/min 限制）。
+    已有快取的 ticker 不計入節流計數。
+    進度：每 10 只打印一次。
+
+    Returns:
+        {"cached": N, "fetched": N, "failed": N}
+    """
+    from data.polygon_client import (
+        CACHE_DIR, MAX_CACHE_DAYS, _last_weekday,
+        get_history as _poly_get_history,
+    )
+
+    to_date    = end_date or _last_weekday()
+    cache_days = MAX_CACHE_DAYS                                       # 730
+    from_date  = (datetime.strptime(to_date, "%Y-%m-%d")
+                  - timedelta(days=cache_days)).strftime("%Y-%m-%d")
+
+    unique_tickers = sorted({t for t in tickers if t})
+
+    # 分類：哪些已有快取 → 跳過；哪些需要 API 拉取
+    to_fetch: list[str] = []
+    for ticker in unique_tickers:
+        cache_file = CACHE_DIR / f"history_{ticker}_{from_date}_{to_date}.json"
+        if not cache_file.exists():
+            to_fetch.append(ticker)
+
+    cached_count = len(unique_tickers) - len(to_fetch)
+    print(f"  總計 {len(unique_tickers)} 只  ·  "
+          f"已快取 {cached_count} 只  ·  "
+          f"需拉取 {len(to_fetch)} 只")
+
+    if not to_fetch:
+        print("  全部命中快取，跳過 API 請求")
+        return {"cached": cached_count, "fetched": 0, "failed": 0}
+
+    BATCH_SIZE  = 5
+    BATCH_SLEEP = 61   # 略超過 60s，確保不超過 5 calls/min
+
+    fetched = failed = 0
+    api_calls = 0      # 本輪實際發出的 API 請求數
+
+    for i, ticker in enumerate(to_fetch, 1):
+        # 進度：第 1 只、每 10 只、最後一只
+        if i == 1 or i % 10 == 0 or i == len(to_fetch):
+            print(f"  [{i}/{len(to_fetch)}] 拉取 {ticker} …")
+
+        try:
+            df = _poly_get_history(ticker, days=730, end_date=end_date)
+            if not df.empty:
+                fetched += 1
+            else:
+                failed += 1
+        except Exception as e:
+            print(f"  [warn] {ticker} 預載失敗: {e}")
+            failed += 1
+
+        api_calls += 1
+
+        # 每 BATCH_SIZE 次 API 請求後節流（最後一批不需要等）
+        if api_calls % BATCH_SIZE == 0 and i < len(to_fetch):
+            print(f"  [節流] 已請求 {api_calls} 次，暫停 {BATCH_SLEEP}s …")
+            time.sleep(BATCH_SLEEP)
+
+    print(f"  預載完成：命中快取 {cached_count}  |  新拉取 {fetched}  |  失敗 {failed}")
+    return {"cached": cached_count, "fetched": fetched, "failed": failed}
 
 
 # ── 核心扫描流程 ──────────────────────────────────────────────────────────────
@@ -67,6 +141,9 @@ def run_daily_scan(date: str = None) -> dict:
         "ep_signals":      0,
         "vcp_signals":     0,
         "bottom_signals":  0,
+        "post_ep_signals": 0,
+        "cup_signals":     0,
+        "mr_signals":      0,
         "buy_signals":     0,
         "risk_on":         True,
         "vix":             None,
@@ -77,10 +154,13 @@ def run_daily_scan(date: str = None) -> dict:
     market_env        = {"risk_on": True, "vix": None, "spy_trend": None, "reason": ""}
     fund_candidates   = []
     tech_candidates   = []
-    ep_signals_list   = []
-    vcp_signals_list  = []
-    bottom_signals_list = []
-    buy_signals       = []
+    ep_signals_list      = []
+    vcp_signals_list     = []
+    bottom_signals_list  = []
+    post_ep_signals_list = []
+    cup_signals_list     = []
+    mr_signals_list      = []
+    buy_signals          = []
 
     # ── Step 1: 交易日检查 ────────────────────────────────────────────────────
     if not is_backtest:
@@ -152,13 +232,26 @@ def run_daily_scan(date: str = None) -> dict:
         _write_summary(summary, [], market_env)
         return summary
 
+    # ── Step 4.5: 歷史數據預載（共享快取，避免各 detector 重複拉取）────────────
+    t0 = _step("Step 4.5: 歷史數據預載")
+    all_preload_tickers = []
+    for s in fund_candidates:
+        t = s.get("ticker") or s.get("T", "")
+        if t:
+            all_preload_tickers.append(t)
+    preload_stats = _preload_history(all_preload_tickers, end_date=date)
+    _done(t0, f"預載（拉取 {preload_stats['fetched']} / 快取 {preload_stats['cached']} / 失敗 {preload_stats['failed']}）")
+
     # ── Step 5: 信号检测 ──────────────────────────────────────────────────────
-    ep_signals_list = []
-    vcp_signals_list = []
-    bf_signals_list = []
-    ws_signals_list = []
-    bottom_signals_list = []
-    t0 = _step("Step 5: 信号检测（EP + VCP + Bull Flag + Weinstein + Bottom Finder）")
+    ep_signals_list      = []
+    vcp_signals_list     = []
+    bf_signals_list      = []
+    ws_signals_list      = []
+    bottom_signals_list  = []
+    post_ep_signals_list = []
+    cup_signals_list     = []
+    mr_signals_list      = []
+    t0 = _step("Step 5: 信号检测（EP+VCP+BullFlag+Weinstein+BottomFinder+PostEP+CupHandle+MeanReversion）")
     _t5 = time.time()
 
     _ts = time.time()
@@ -207,11 +300,42 @@ def run_daily_scan(date: str = None) -> dict:
         print(f"  [error] Bottom Finder 检测失败: {e}")
     print(f"  ⏱ Bottom Finder 耗时: {time.time()-_ts:.1f}s → {len(bottom_signals_list)}只信号")
 
+    # Post-EP Tight 使用 tech_candidates
+    _ts = time.time()
+    try:
+        from signals.post_ep_tight_detector import detect as post_ep_detect
+        post_ep_signals_list = post_ep_detect(tech_candidates, date=date)
+        summary["post_ep_signals"] = len(post_ep_signals_list)
+    except Exception as e:
+        print(f"  [error] Post-EP Tight 检测失败: {e}")
+    print(f"  ⏱ Post-EP Tight 耗时: {time.time()-_ts:.1f}s → {len(post_ep_signals_list)}只信号")
+
+    # Cup & Handle 使用 tech_candidates
+    _ts = time.time()
+    try:
+        from signals.cup_handle_detector import detect as cup_detect
+        cup_signals_list = cup_detect(tech_candidates, date=date)
+        summary["cup_signals"] = len(cup_signals_list)
+    except Exception as e:
+        print(f"  [error] Cup & Handle 检测失败: {e}")
+    print(f"  ⏱ Cup & Handle 耗时: {time.time()-_ts:.1f}s → {len(cup_signals_list)}只信号")
+
+    # Mean Reversion 使用 fund_candidates（超賣股票未必在 Stage 2）
+    _ts = time.time()
+    try:
+        from signals.mean_reversion_detector import detect as mr_detect
+        mr_signals_list = mr_detect(fund_candidates, date=date, market_env=market_env)
+        summary["mr_signals"] = len(mr_signals_list)
+    except Exception as e:
+        print(f"  [error] Mean Reversion 检测失败: {e}")
+    print(f"  ⏱ Mean Reversion 耗时: {time.time()-_ts:.1f}s → {len(mr_signals_list)}只信号")
+
     # 去重：同一 ticker 保留最高分信号
     _seen = set()
     merged_signals = []
     for s in (ep_signals_list + vcp_signals_list + bf_signals_list
-              + ws_signals_list + bottom_signals_list):
+              + ws_signals_list + bottom_signals_list
+              + post_ep_signals_list + cup_signals_list + mr_signals_list):
         t = s.get("ticker", "")
         if t not in _seen:
             _seen.add(t)
@@ -219,7 +343,9 @@ def run_daily_scan(date: str = None) -> dict:
 
     print(f"\n  EP: {len(ep_signals_list)}只  VCP: {len(vcp_signals_list)}只  "
           f"BullFlag: {len(bf_signals_list)}只  Weinstein: {len(ws_signals_list)}只  "
-          f"BottomFinder: {len(bottom_signals_list)}只  合并去重: {len(merged_signals)}只")
+          f"BottomFinder: {len(bottom_signals_list)}只  "
+          f"PostEP: {len(post_ep_signals_list)}只  CupHandle: {len(cup_signals_list)}只  "
+          f"MeanReversion: {len(mr_signals_list)}只  合并去重: {len(merged_signals)}只")
     _done(t0, "信号检测")
 
     # ── Step 6: Claude 信号生成 ───────────────────────────────────────────────
@@ -228,7 +354,10 @@ def run_daily_scan(date: str = None) -> dict:
         from signals.signal_generator import generate
         all_signals  = generate(ep_signals_list, vcp_signals_list, market_env,
                                 bf_signals=bf_signals_list, ws_signals=ws_signals_list,
-                                bottom_signals=bottom_signals_list)
+                                bottom_signals=bottom_signals_list,
+                                post_ep_signals=post_ep_signals_list,
+                                cup_signals=cup_signals_list,
+                                mr_signals=mr_signals_list)
         buy_signals  = [s for s in all_signals if str(s.get("action", "")).upper() in ("BUY", "BUY_RISKY")]
         watch_signals = [s for s in all_signals if str(s.get("action", "")).upper() == "WATCH"]
         summary["buy_signals"] = len(buy_signals)

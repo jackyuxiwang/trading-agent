@@ -20,17 +20,18 @@
 - P0 完成：项目骨架、依赖、API keys
 - P1 完成：polygon_client、eodhd_client、market_env_client、tiingo_client（内部用Polygon）
 - P2 完成：fundamental_filter（329只）、technical_filter（52-60只）
-- P3 完成：ep_detector、vcp_scorer（含低吸策略）、bull_flag_detector、weinstein_detector、bottom_finder_detector、signal_generator
+- P3 完成：ep_detector、vcp_scorer（含低吸策略）、bull_flag_detector、weinstein_detector、bottom_finder_detector、post_ep_tight_detector、cup_handle_detector、mean_reversion_detector、signal_generator
 - P4 完成：discord_alert、report_formatter（含WATCH信号）、log_writer
 - P5 完成：main.py 主调度器（并发Claude分析）
 - P6 完成：即时 EP 扫描器（polygon_snapshot.py + realtime_ep_scanner.py + main_realtime.py）
 - Portfolio 完成：position_sizer、virtual_account、trade_logger、weekly_report
 - 部署完成：run_daily.sh + cron（HKT 5:30 AM 周一至周五）+ pmset 自动唤醒（5:25 AM）
-- 待完成：Cup & Handle、Livermore Pivotal Point
+- 待完成：Livermore Pivotal Point
 
 ## 扫描漏斗
 全市场11000+只 → Polygon量价初筛（~2800只）→ FMP/Finviz基本面精筛（~329只）→ 技术面确认（52-60只）→ 信号引擎 → Discord推送
-Bottom Finder 并行路径：基本面候选（~329只）→ bottom_finder_detector（跳过技术面，直接用Polygon 365天日线）
+Bottom Finder / Mean Reversion 并行路径：基本面候选（~329只）→ bottom_finder_detector / mean_reversion_detector（跳过技术面）
+Post-EP Tight / Cup Handle 使用 tech_candidates（同 EP/VCP）
 
 ## 筛选参数
 - 市值：5亿–500亿美元
@@ -39,7 +40,7 @@ Bottom Finder 并行路径：基本面候选（~329只）→ bottom_finder_detec
 - Stage2：收盘价 > MA20 且 > MA50
 - technical_score >= 35
 
-## 五种信号形态
+## 八种信号形态
 1. EP（Episodic Pivot）：催化剂驱动跳空，缺口>5%，放量，收阳线
 2. VCP（Volatility Contraction Pattern）：三段波动递减，量缩后突破
    - 含低吸策略（VCP_CHEAT_ENTRY）：止损>10%时计算低吸买入区，评估可行性
@@ -48,6 +49,15 @@ Bottom Finder 并行路径：基本面候选（~329只）→ bottom_finder_detec
 5. Bottom Finder：长期下跌（>=35%）→底部築底（25-150天）→ Higher Lows → 量缩 → 放量突破
    - 使用 fund_candidates（非 tech_candidates），跳过 Stage 2 硬性条件
    - Polygon 365天日线，内建快取（history_{ticker}_{from}_{to}.json）
+6. Post-EP Tight（post_ep_tight_detector）：EP跳空后3–10天紧密盘整，量缩，等待第二段突破
+   - 搜索过去10天内EP事件，验证盘整振幅≤50%缺口、均量≤50% EP量、缺口未回补
+   - entry=盘整高点, stop=EP开盘×0.99, target=entry+EP涨幅×0.618
+7. Cup & Handle（cup_handle_detector）：O'Neil杯柄形态，杯深15–45%，右侧回升≥85%，柄部量缩后突破
+   - 杯宽最长220天，柄5–25天，量缩<0.8x，突破量≥1.5x
+   - entry=柄高, stop=柄低×0.99, target=entry+杯深（量升幅度）
+8. Mean Reversion（mean_reversion_detector）：优质股超跌均值回归，RSI<30+BB下轨+MA50偏离>15%
+   - 使用 fund_candidates，需≥2个超卖信号 + ≥1个反弹信号（锤子/吞没/RSI背离）
+   - entry=当前价, stop=近5日低点×0.97, target=MA50；R/R≥1.5
 
 ## 信号类型
 - BUY：大盘正常，直接买入
@@ -73,7 +83,7 @@ Bottom Finder 并行路径：基本面候选（~329只）→ bottom_finder_detec
 - EP detector：复用 technical_filter 缓存的 last_open/prev_close，零额外API请求
 - VCP/BullFlag/Weinstein：各自调用 tiingo_client（内部Polygon），结果按日期缓存到 data/cache/
 - VCP低吸（VCP_CHEAT_ENTRY）：止损>10%时启用，计算低吸区+可行性评分（0-100），Claude据此判断WATCH/BUY/SKIP
-- 信号引擎：Claude API（claude-sonnet-4-6）并发分析，最多5个并发，串行提速约2x
+- 信号引擎：Claude API（claude-sonnet-4-6）并发分析，最多3个并发（MAX_WORKERS=3），529 自动重试+haiku降级
 - 告警：Discord Webhook，每天收盘后推送（BUY+WATCH信号均显示）
 - 缓存目录：data/cache/，当天缓存不重复请求（tiingo_{TICKER}_{date}.json 格式）
 - risk_on=False 时：不退出，继续扫描，信号标注风险警告，报告置顶红色提示

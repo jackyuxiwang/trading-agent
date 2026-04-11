@@ -145,6 +145,74 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
                     lines.append(f"逻辑：{reason}")
                 if risk_warn:
                     lines.append(f"风险：{risk_warn}")
+            elif stype == "POST_EP_TIGHT":
+                score        = s.get("score", "?")
+                ep_gap       = s.get("ep_gap_pct")
+                consol_days  = s.get("consol_days", "?")
+                amp_ratio    = s.get("amp_ratio")
+                vol_ratio_ep = s.get("vol_ratio_to_ep")
+                gap_ok       = "是" if s.get("gap_maintained") else "否"
+
+                ep_gap_str   = f"+{ep_gap:.1f}%" if isinstance(ep_gap, (int, float)) else "N/A"
+                amp_str      = f"{amp_ratio:.2f}x" if isinstance(amp_ratio, (int, float)) else "N/A"
+                vol_ep_str   = f"{vol_ratio_ep:.2f}x" if isinstance(vol_ratio_ep, (int, float)) else "N/A"
+
+                lines.append(f"⚡ {ticker} — EP後盤整（評分 {score}/100）（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"入場區間：{entry}")
+                lines.append(f"止損：{stop} | 目標一：{t1} | 目標二：{t2}")
+                lines.append(f"EP缺口：{ep_gap_str} | 盤整{consol_days}天 | 振幅{amp_str} | "
+                              f"量比{vol_ep_str} | 缺口保持：{gap_ok}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
+                if risk_warn:
+                    lines.append(f"风险：{risk_warn}")
+            elif stype == "CUP_HANDLE":
+                score        = s.get("score", "?")
+                cup_depth    = s.get("cup_depth_pct")
+                cup_length   = s.get("cup_length", "?")
+                handle_days  = s.get("handle_length", "?")
+                right_rec    = s.get("right_recovery_pct")
+                brk_vol      = s.get("breakout_vol_ratio")
+
+                cup_depth_str = f"{cup_depth:.1f}%" if isinstance(cup_depth, (int, float)) else "N/A"
+                right_rec_str = f"{right_rec:.1f}%" if isinstance(right_rec, (int, float)) else "N/A"
+                brk_vol_str   = f"{brk_vol:.1f}x" if isinstance(brk_vol, (int, float)) else "N/A"
+
+                lines.append(f"🏆 {ticker} — 杯柄型態（評分 {score}/100）（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"入場區間：{entry}")
+                lines.append(f"止損：{stop} | 目標一：{t1} | 目標二：{t2}")
+                lines.append(f"杯深{cup_depth_str} | 杯寬{cup_length}天 | 柄{handle_days}天 | "
+                              f"右側回升{right_rec_str} | 突破量{brk_vol_str}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
+                if risk_warn:
+                    lines.append(f"风险：{risk_warn}")
+            elif stype == "MEAN_REVERSION":
+                score        = s.get("score", "?")
+                rsi          = s.get("rsi")
+                ma50_dev     = s.get("ma50_dev_pct")
+                bounce_type  = s.get("bounce_type", "N/A")
+                oversold_cnt = s.get("oversold_count", "?")
+                rr           = s.get("risk_reward")
+
+                rsi_str      = f"{rsi:.1f}" if isinstance(rsi, (int, float)) else "N/A"
+                ma50_str     = f"{ma50_dev:.1f}%" if isinstance(ma50_dev, (int, float)) else "N/A"
+                rr_str       = f"{rr:.1f}:1" if isinstance(rr, (int, float)) else "N/A"
+
+                lines.append(f"🔄 {ticker} — 均值回歸（評分 {score}/100）（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"入場區間：{entry}")
+                lines.append(f"止損：{stop} | 目標（MA50）：{t1} | 風報比：{rr_str}")
+                lines.append(f"RSI：{rsi_str} | MA50偏離：{ma50_str} | 超賣信號：{oversold_cnt}/5 | 反彈：{bounce_type}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
+                if risk_warn:
+                    lines.append(f"风险：{risk_warn}")
             else:
                 lines.append(f"🔥 {ticker} — {stype} 信号（置信度 {conf}/10）")
                 if company or sector:
@@ -243,6 +311,68 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
                 lines.append(f"止損參考：{stop} | 目標一：{t1} | 風報比：{rr_str}")
                 lines.append(f"型態：下跌{decline_str} | 築底{base_days}天 | "
                               f"{higher_lows}個HL | 量縮{vol_cont_str} | 突破量{brk_vol_str}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
+            elif stype == "POST_EP_TIGHT":
+                score        = s.get("score", "?")
+                ep_gap       = s.get("ep_gap_pct")
+                consol_days  = s.get("consol_days", "?")
+                amp_ratio    = s.get("amp_ratio")
+                vol_ratio_ep = s.get("vol_ratio_to_ep")
+                gap_ok       = "是" if s.get("gap_maintained") else "否"
+
+                ep_gap_str   = f"+{ep_gap:.1f}%" if isinstance(ep_gap, (int, float)) else "N/A"
+                amp_str      = f"{amp_ratio:.2f}x" if isinstance(amp_ratio, (int, float)) else "N/A"
+                vol_ep_str   = f"{vol_ratio_ep:.2f}x" if isinstance(vol_ratio_ep, (int, float)) else "N/A"
+
+                lines.append(f"⚡ {ticker} — EP後盤整關注（評分 {score}/100）（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"關注區間：{entry}")
+                lines.append(f"止損參考：{stop} | 目標一：{t1}")
+                lines.append(f"EP缺口：{ep_gap_str} | 盤整{consol_days}天 | 振幅{amp_str} | "
+                              f"量比{vol_ep_str} | 缺口保持：{gap_ok}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
+            elif stype == "CUP_HANDLE":
+                score        = s.get("score", "?")
+                cup_depth    = s.get("cup_depth_pct")
+                cup_length   = s.get("cup_length", "?")
+                handle_days  = s.get("handle_length", "?")
+                right_rec    = s.get("right_recovery_pct")
+                brk_vol      = s.get("breakout_vol_ratio")
+
+                cup_depth_str = f"{cup_depth:.1f}%" if isinstance(cup_depth, (int, float)) else "N/A"
+                right_rec_str = f"{right_rec:.1f}%" if isinstance(right_rec, (int, float)) else "N/A"
+                brk_vol_str   = f"{brk_vol:.1f}x" if isinstance(brk_vol, (int, float)) else "N/A"
+
+                lines.append(f"🏆 {ticker} — 杯柄型態關注（評分 {score}/100）（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"關注區間：{entry}")
+                lines.append(f"止損參考：{stop} | 目標一：{t1}")
+                lines.append(f"杯深{cup_depth_str} | 杯寬{cup_length}天 | 柄{handle_days}天 | "
+                              f"右側回升{right_rec_str} | 突破量{brk_vol_str}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
+            elif stype == "MEAN_REVERSION":
+                score        = s.get("score", "?")
+                rsi          = s.get("rsi")
+                ma50_dev     = s.get("ma50_dev_pct")
+                bounce_type  = s.get("bounce_type", "N/A")
+                oversold_cnt = s.get("oversold_count", "?")
+                rr           = s.get("risk_reward")
+
+                rsi_str      = f"{rsi:.1f}" if isinstance(rsi, (int, float)) else "N/A"
+                ma50_str     = f"{ma50_dev:.1f}%" if isinstance(ma50_dev, (int, float)) else "N/A"
+                rr_str       = f"{rr:.1f}:1" if isinstance(rr, (int, float)) else "N/A"
+
+                lines.append(f"🔄 {ticker} — 均值回歸關注（評分 {score}/100）（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"關注區間：{entry}")
+                lines.append(f"止損參考：{stop} | 目標（MA50）：{t1} | 風報比：{rr_str}")
+                lines.append(f"RSI：{rsi_str} | MA50偏離：{ma50_str} | 超賣信號：{oversold_cnt}/5 | 反彈：{bounce_type}")
                 if reason:
                     lines.append(f"逻辑：{reason}")
             else:
