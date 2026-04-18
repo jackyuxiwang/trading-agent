@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.tiingo_client import get_history
+from data.polygon_client import get_history
 
 # ── 輸出目錄 ──────────────────────────────────────────────────────────────────
 CHART_DIR = Path(__file__).parent.parent / "output" / "charts"
@@ -98,13 +98,15 @@ def _compute_bb(closes: np.ndarray, period: int = 20, std_mult: float = 2.0):
 
 # ── 右側標籤水平線 ────────────────────────────────────────────────────────────
 
-def _hline_labeled(ax, price: Optional[float], color: str, ls: str, lw: float = 1.1) -> None:
-    """繪製水平線 + 右側價格標籤（使用混合坐標系，標籤不被截斷）。"""
+def _hline_labeled(ax, price: Optional[float], color: str, ls: str,
+                   lw: float = 1.3, label: str = "") -> None:
+    """繪製水平線 + 右側帶前綴的價格標籤（使用混合坐標系，標籤不被截斷）。"""
     if price is None:
         return
     ax.axhline(price, color=color, linestyle=ls, linewidth=lw, alpha=0.85, zorder=5)
     trans = blended_transform_factory(ax.transAxes, ax.transData)
-    ax.text(1.003, price, f"{price:.2f}", color=color, fontsize=7.5,
+    tag = f"{label} ${price:.2f}" if label else f"${price:.2f}"
+    ax.text(1.003, price, tag, color=color, fontsize=9,
             va="center", ha="left", transform=trans, clip_on=False,
             fontweight="bold")
 
@@ -202,7 +204,8 @@ def generate_signal_chart(signal: dict, save_path: str = None) -> str:
     action      = signal.get("action", "")
 
     # ── 1. 獲取歷史數據 ───────────────────────────────────────────────────────
-    df = get_history(ticker, days=CHART_DAYS)
+    end_date = signal.get("date") or None
+    df = get_history(ticker, days=CHART_DAYS, end_date=end_date)
     if df.empty or len(df) < 10:
         raise ValueError(f"[chart] {ticker} 無法獲取歷史數據")
 
@@ -263,16 +266,31 @@ def generate_signal_chart(signal: dict, save_path: str = None) -> str:
         _overlay_bollinger(ax_p, closes, xs)
 
     # ── 6. 交易線（Entry / Stop / Target / 當前價） ───────────────────────────
-    _hline_labeled(ax_p, entry_price,  ENTRY_COLOR,  "--",  lw=1.1)
-    _hline_labeled(ax_p, stop_loss,    STOP_COLOR,   "--",  lw=1.0)
-    _hline_labeled(ax_p, target_price, TARGET_COLOR, "-.",  lw=1.0)
+    _hline_labeled(ax_p, entry_price,  ENTRY_COLOR,  "--",  lw=1.3, label="Entry")
+    _hline_labeled(ax_p, stop_loss,    STOP_COLOR,   "--",  lw=1.3, label="Stop")
+    _hline_labeled(ax_p, target_price, TARGET_COLOR, "-.",  lw=1.3, label="Target")
 
-    ax_p.axhline(current_price, color=CURR_COLOR, linestyle=":",
-                 linewidth=0.8, alpha=0.5, zorder=4)
+    # 利潤區（Entry→Target）和風險區（Stop→Entry）半透明填充
+    if entry_price and target_price and target_price > entry_price:
+        ax_p.axhspan(entry_price, target_price, alpha=0.08, color="#3fb950", zorder=1)
+    if stop_loss and entry_price and entry_price > stop_loss:
+        ax_p.axhspan(stop_loss, entry_price, alpha=0.08, color="#f85149", zorder=1)
+
+    # Entry 附近最近 K 線的 BUY 箭頭標記
+    if entry_price:
+        closes_arr = df["close"].values.astype(float)
+        diffs = np.abs(closes_arr - entry_price)
+        x_buy = int(np.argmin(diffs[-20:]) + max(0, n - 20))
+        ax_p.annotate("▲ BUY", xy=(x_buy, entry_price),
+                      fontsize=10, color=ENTRY_COLOR, fontweight="bold",
+                      ha="center", va="bottom", zorder=6)
+
+    ax_p.axhline(current_price, color=CURR_COLOR, linestyle="--",
+                 linewidth=1.1, alpha=0.75, zorder=4)
     trans_curr = blended_transform_factory(ax_p.transAxes, ax_p.transData)
-    ax_p.text(1.003, current_price, f"{current_price:.2f}",
-              color=CURR_COLOR, fontsize=7, va="center", ha="left",
-              transform=trans_curr, alpha=0.7)
+    ax_p.text(1.003, current_price, f"Now ${current_price:.2f}",
+              color=CURR_COLOR, fontsize=9, va="center", ha="left",
+              transform=trans_curr, clip_on=False, fontweight="bold")
 
     # Y 軸留白（包含 entry/stop/target 確保所有交易線可見）
     y_lo = float(df["low"].min())
@@ -325,13 +343,15 @@ def generate_signal_chart(signal: dict, save_path: str = None) -> str:
                 framealpha=0.25, facecolor=BG_COLOR, edgecolor=GRID_COLOR,
                 labelcolor=TEXT_COLOR, fontsize=8, ncol=2)
 
-    # ── 10. 標題 ──────────────────────────────────────────────────────────────
-    score_str = f"  Score {signal.get('score')}/100" if signal.get("score") else ""
-    rr_val    = signal.get("risk_reward")
-    rr_str    = f"  R/R {rr_val}" if rr_val else ""
+    # ── 10. 標題（含當前價格和日期） ─────────────────────────────────────────
+    score_str      = f"  Score {signal.get('score')}/100" if signal.get("score") else ""
+    rr_val         = signal.get("risk_reward")
+    rr_str         = f"  R/R {rr_val}" if rr_val else ""
     action_bracket = f"[{action}]" if action else ""
-    title = f"{ticker}  {signal_type}  {action_bracket}{score_str}{rr_str}"
-    fig.suptitle(title, color=TEXT_COLOR, fontsize=13, fontweight="bold",
+    last_date      = dates[-1] if dates else ""
+    title = (f"{ticker}  {signal_type}  {action_bracket}{score_str}{rr_str}"
+             f"  |  ${current_price:.2f}  |  {last_date}")
+    fig.suptitle(title, color=TEXT_COLOR, fontsize=12, fontweight="bold",
                  x=0.02, ha="left")
 
     # ── 11. 底部信息條 ────────────────────────────────────────────────────────

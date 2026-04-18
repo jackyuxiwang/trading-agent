@@ -41,7 +41,8 @@
       "Bash(python:*)",
       "Bash(__NEW_LINE_48a4c709b2d8151b__ rm:*)",
       "Bash(source /Users/jackwang/trading-agent/venv/bin/activate)",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Bash(open:*)"
     ]
   }
 }
