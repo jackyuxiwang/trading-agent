@@ -46,10 +46,11 @@ def _merge_signals(ep_signals: list, vcp_signals: list,
                    bottom_signals: list = None,
                    post_ep_signals: list = None,
                    cup_signals: list = None,
-                   mr_signals: list = None) -> list:
+                   mr_signals: list = None,
+                   fw_signals: list = None) -> list:
     """
     合并 EP / VCP / Bull Flag / Weinstein / Bottom Finder /
-    Post-EP Tight / Cup Handle / Mean Reversion 信号，
+    Post-EP Tight / Cup Handle / Mean Reversion / Falling Wedge 信号，
     同一股票只保留得分更高的那条。统一映射到 signal_score 字段。
     """
     merged: dict = {}  # ticker → signal dict
@@ -70,6 +71,7 @@ def _merge_signals(ep_signals: list, vcp_signals: list,
     for s in (post_ep_signals or []): _put(s, "score")
     for s in (cup_signals or []):     _put(s, "score")
     for s in (mr_signals or []):      _put(s, "score")
+    for s in (fw_signals or []):      _put(s, "score")
 
     result = list(merged.values())
     result.sort(key=lambda x: x.get("signal_score", 0), reverse=True)
@@ -105,6 +107,8 @@ def _build_prompt(stock: dict, market_env: dict) -> str:
         score_label, score_val = "杯柄評分",         stock.get("score")
     elif signal_type == "MEAN_REVERSION":
         score_label, score_val = "均值回歸評分",     stock.get("score")
+    elif signal_type == "FALLING_WEDGE":
+        score_label, score_val = "下降楔形評分",     stock.get("score")
     else:
         score_label, score_val = "VCP评分",         stock.get("vcp_score")
 
@@ -251,7 +255,27 @@ def _build_prompt(stock: dict, market_env: dict) -> str:
                 f"重點評估：反彈信號是否可靠？基本面是否支撐估值？大盤環境是否適合逆勢操作？",
                 f"注意：均值回歸策略需要嚴格止損，不宜重倉。",
             ]
-            if signal_type == "MEAN_REVERSION" else []
+            if signal_type == "MEAN_REVERSION" else
+            [
+                f"- 下降楔形突破型態：股價形成Lower Highs + Lower Lows收斂楔形，放量突破上方阻力線",
+                f"- 楔形持續天數：{stock.get('wedge_days', 'N/A')} 天",
+                f"- Swing High 數量：{stock.get('swing_high_count', 'N/A')} 個（Lower Highs序列）",
+                f"- Swing Low 數量：{stock.get('swing_low_count', 'N/A')} 個（Lower Lows序列）",
+                f"- 趨勢線擬合 R²：上方 {stock.get('h_r2', 'N/A')} / 下方 {stock.get('l_r2', 'N/A')}（越接近1越好）",
+                f"- 量縮比例：後半段均量 / 前半段均量 = {stock.get('vol_ratio', 'N/A')}（<0.7為佳）",
+                f"- 突破量能：{stock.get('breakout_vol_ratio', 'N/A')}x 50日均量",
+                f"- 已突破：{'是' if stock.get('is_breakout') else '否（接近突破）'}",
+                f"- 距阻力線：{stock.get('dist_to_resistance', 'N/A')}%（正=已突破，負=尚未突破）",
+                f"- RSI看漲背離：{'是（極強反轉信號）' if stock.get('rsi_divergence') else '否'}",
+                f"- 建議入場：${stock.get('entry_price', 'N/A')}（上方趨勢線阻力位）",
+                f"- 建議止損：${stock.get('stop_loss', 'N/A')}（最近Swing Low下方2%）",
+                f"- 預估目標：${stock.get('target_price', 'N/A')}（Measured Move = 楔形入口高度）",
+                f"- 風報比：{stock.get('risk_reward', 'N/A')}:1",
+                f"",
+                f"重點評估：突破是否有效（放量 ≥1.5x均量）？RSI背離是否確認？楔形收斂是否清晰？",
+                f"下降楔形統計勝率約80%，是可靠的底部反轉信號，但需要放量突破確認。",
+            ]
+            if signal_type == "FALLING_WEDGE" else []
         ),
         f"",
         f"基本面数据：",
@@ -392,10 +416,11 @@ def generate(ep_signals: list, vcp_signals: list, market_env: dict,
              bottom_signals: list = None,
              post_ep_signals: list = None,
              cup_signals: list = None,
-             mr_signals: list = None) -> list:
+             mr_signals: list = None,
+             fw_signals: list = None) -> list:
     """
     综合 EP + VCP + Bull Flag + Weinstein + Bottom Finder +
-    Post-EP Tight + Cup Handle + Mean Reversion 信号，
+    Post-EP Tight + Cup Handle + Mean Reversion + Falling Wedge 信号，
     调用 Claude 分析，返回最终信号列表。
 
     Args:
@@ -408,6 +433,7 @@ def generate(ep_signals: list, vcp_signals: list, market_env: dict,
         post_ep_signals: post_ep_tight_detector.detect() 的结果（可选）
         cup_signals:     cup_handle_detector.detect() 的结果（可选）
         mr_signals:      mean_reversion_detector.detect() 的结果（可选）
+        fw_signals:      falling_wedge_detector.detect() 的结果（可选）
 
     Returns:
         action="BUY"/"BUY_RISKY" 的信号列表，按 confidence 降序
@@ -418,7 +444,8 @@ def generate(ep_signals: list, vcp_signals: list, market_env: dict,
                                 bottom_signals or [],
                                 post_ep_signals or [],
                                 cup_signals or [],
-                                mr_signals or [])
+                                mr_signals or [],
+                                fw_signals or [])
     total      = len(candidates)
 
     print(f"[signal_generator] 开始 Claude 分析")
@@ -426,7 +453,8 @@ def generate(ep_signals: list, vcp_signals: list, market_env: dict,
           f"  BullFlag信号: {len(bf_signals or [])}  Weinstein信号: {len(ws_signals or [])}"
           f"  BottomFinder信号: {len(bottom_signals or [])}"
           f"  PostEP信号: {len(post_ep_signals or [])}  CupHandle信号: {len(cup_signals or [])}"
-          f"  MeanReversion信号: {len(mr_signals or [])}  合并后: {total} 只")
+          f"  MeanReversion信号: {len(mr_signals or [])}  FallingWedge信号: {len(fw_signals or [])}"
+          f"  合并后: {total} 只")
     print(f"  模型: {MODEL}")
 
     if total == 0:

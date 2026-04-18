@@ -144,6 +144,7 @@ def run_daily_scan(date: str = None) -> dict:
         "post_ep_signals": 0,
         "cup_signals":     0,
         "mr_signals":      0,
+        "fw_signals":      0,
         "buy_signals":     0,
         "risk_on":         True,
         "vix":             None,
@@ -160,6 +161,7 @@ def run_daily_scan(date: str = None) -> dict:
     post_ep_signals_list = []
     cup_signals_list     = []
     mr_signals_list      = []
+    fw_signals_list      = []
     buy_signals          = []
 
     # ── Step 1: 交易日检查 ────────────────────────────────────────────────────
@@ -296,7 +298,8 @@ def run_daily_scan(date: str = None) -> dict:
     post_ep_signals_list = []
     cup_signals_list     = []
     mr_signals_list      = []
-    t0 = _step("Step 5: 信号检测（EP+VCP+BullFlag+Weinstein+BottomFinder+PostEP+CupHandle+MeanReversion）")
+    fw_signals_list      = []
+    t0 = _step("Step 5: 信号检测（EP+VCP+BullFlag+Weinstein+BottomFinder+PostEP+CupHandle+MeanReversion+FallingWedge）")
     _t5 = time.time()
 
     _ts = time.time()
@@ -375,12 +378,36 @@ def run_daily_scan(date: str = None) -> dict:
         print(f"  [error] Mean Reversion 检测失败: {e}")
     print(f"  ⏱ Mean Reversion 耗时: {time.time()-_ts:.1f}s → {len(mr_signals_list)}只信号")
 
+    # Falling Wedge 使用 fund_candidates 中距 52W High >= 15% 的（股價在下跌才可能有楔形）
+    _ts = time.time()
+    try:
+        from signals.falling_wedge_detector import detect as fw_detect
+        fw_candidates = []
+        for _s in fund_candidates:
+            _ticker  = _s.get("ticker") or _s.get("T", "")
+            _price   = _s.get("price")
+            _high52w = _s.get("52w_high")
+            if not _ticker:
+                continue
+            if _high52w and _price and _price > 0:
+                _dist = (_high52w - _price) / _high52w * 100
+                if _dist < 15.0:
+                    continue   # 股價接近前高，不太可能有下降楔形
+            fw_candidates.append(_s)
+        print(f"  [falling_wedge] fund_candidates 距52W High≥15%（或無數據）：{len(fw_candidates)}只")
+        fw_signals_list = fw_detect(fw_candidates, date=date)
+        summary["fw_signals"] = len(fw_signals_list)
+    except Exception as e:
+        print(f"  [error] Falling Wedge 检测失败: {e}")
+    print(f"  ⏱ Falling Wedge 耗时: {time.time()-_ts:.1f}s → {len(fw_signals_list)}只信号")
+
     # 去重：同一 ticker 保留最高分信号
     _seen = set()
     merged_signals = []
     for s in (ep_signals_list + vcp_signals_list + bf_signals_list
               + ws_signals_list + bottom_signals_list
-              + post_ep_signals_list + cup_signals_list + mr_signals_list):
+              + post_ep_signals_list + cup_signals_list + mr_signals_list
+              + fw_signals_list):
         t = s.get("ticker", "")
         if t not in _seen:
             _seen.add(t)
@@ -390,7 +417,8 @@ def run_daily_scan(date: str = None) -> dict:
           f"BullFlag: {len(bf_signals_list)}只  Weinstein: {len(ws_signals_list)}只  "
           f"BottomFinder: {len(bottom_signals_list)}只  "
           f"PostEP: {len(post_ep_signals_list)}只  CupHandle: {len(cup_signals_list)}只  "
-          f"MeanReversion: {len(mr_signals_list)}只  合并去重: {len(merged_signals)}只")
+          f"MeanReversion: {len(mr_signals_list)}只  FallingWedge: {len(fw_signals_list)}只  "
+          f"合并去重: {len(merged_signals)}只")
     _done(t0, "信号检测")
 
     # ── Step 6: Claude 信号生成 ───────────────────────────────────────────────
@@ -402,7 +430,8 @@ def run_daily_scan(date: str = None) -> dict:
                                 bottom_signals=bottom_signals_list,
                                 post_ep_signals=post_ep_signals_list,
                                 cup_signals=cup_signals_list,
-                                mr_signals=mr_signals_list)
+                                mr_signals=mr_signals_list,
+                                fw_signals=fw_signals_list)
         buy_signals  = [s for s in all_signals if str(s.get("action", "")).upper() in ("BUY", "BUY_RISKY")]
         watch_signals = [s for s in all_signals if str(s.get("action", "")).upper() == "WATCH"]
         summary["buy_signals"] = len(buy_signals)

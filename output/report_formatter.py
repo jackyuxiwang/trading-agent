@@ -213,6 +213,36 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
                     lines.append(f"逻辑：{reason}")
                 if risk_warn:
                     lines.append(f"风险：{risk_warn}")
+            elif stype == "FALLING_WEDGE":
+                score        = s.get("score", "?")
+                wedge_days   = s.get("wedge_days", "?")
+                sh_cnt       = s.get("swing_high_count", "?")
+                sl_cnt       = s.get("swing_low_count", "?")
+                h_r2         = s.get("h_r2")
+                l_r2         = s.get("l_r2")
+                bv_ratio     = s.get("breakout_vol_ratio")
+                rsi_div      = s.get("rsi_divergence", False)
+                rr           = s.get("risk_reward")
+                is_brk       = s.get("is_breakout", False)
+
+                avg_r2_str   = (f"{(h_r2+l_r2)/2:.2f}" if isinstance(h_r2, (int, float))
+                                and isinstance(l_r2, (int, float)) else "N/A")
+                bv_str       = f"{bv_ratio:.1f}x" if isinstance(bv_ratio, (int, float)) else "N/A"
+                rr_str       = f"{rr:.1f}:1" if isinstance(rr, (int, float)) else "N/A"
+                brk_str      = "已突破" if is_brk else "接近突破"
+
+                lines.append(f"📐 {ticker} — 下降楔形突破（評分 {score}/100）（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"入場區間：{entry}")
+                lines.append(f"止損：{stop} | 目標一：{t1} | 目標二：{t2} | 風報比：{rr_str}")
+                lines.append(f"楔形{wedge_days}天 | {sh_cnt}個LH + {sl_cnt}個LL | "
+                              f"R²均={avg_r2_str} | 突破量{bv_str} | {brk_str}"
+                              + (" | RSI背離✓" if rsi_div else ""))
+                if reason:
+                    lines.append(f"逻辑：{reason}")
+                if risk_warn:
+                    lines.append(f"风险：{risk_warn}")
             else:
                 lines.append(f"🔥 {ticker} — {stype} 信号（置信度 {conf}/10）")
                 if company or sector:
@@ -373,6 +403,34 @@ def format_daily_report(signals: list, market_env: dict, summary: dict) -> str:
                 lines.append(f"關注區間：{entry}")
                 lines.append(f"止損參考：{stop} | 目標（MA50）：{t1} | 風報比：{rr_str}")
                 lines.append(f"RSI：{rsi_str} | MA50偏離：{ma50_str} | 超賣信號：{oversold_cnt}/5 | 反彈：{bounce_type}")
+                if reason:
+                    lines.append(f"逻辑：{reason}")
+            elif stype == "FALLING_WEDGE":
+                score        = s.get("score", "?")
+                wedge_days   = s.get("wedge_days", "?")
+                sh_cnt       = s.get("swing_high_count", "?")
+                sl_cnt       = s.get("swing_low_count", "?")
+                h_r2         = s.get("h_r2")
+                l_r2         = s.get("l_r2")
+                bv_ratio     = s.get("breakout_vol_ratio")
+                rsi_div      = s.get("rsi_divergence", False)
+                rr           = s.get("risk_reward")
+                is_brk       = s.get("is_breakout", False)
+
+                avg_r2_str   = (f"{(h_r2+l_r2)/2:.2f}" if isinstance(h_r2, (int, float))
+                                and isinstance(l_r2, (int, float)) else "N/A")
+                bv_str       = f"{bv_ratio:.1f}x" if isinstance(bv_ratio, (int, float)) else "N/A"
+                rr_str       = f"{rr:.1f}:1" if isinstance(rr, (int, float)) else "N/A"
+                brk_str      = "已突破" if is_brk else "接近突破"
+
+                lines.append(f"📐 {ticker} — 下降楔形關注（評分 {score}/100）（置信度 {conf}/10）")
+                if company or sector:
+                    lines.append(f"公司：{company}（{sector}）")
+                lines.append(f"關注區間：{entry}")
+                lines.append(f"止損參考：{stop} | 目標一：{t1} | 風報比：{rr_str}")
+                lines.append(f"楔形{wedge_days}天 | {sh_cnt}個LH + {sl_cnt}個LL | "
+                              f"R²均={avg_r2_str} | 突破量{bv_str} | {brk_str}"
+                              + (" | RSI背離✓" if rsi_div else ""))
                 if reason:
                     lines.append(f"逻辑：{reason}")
             else:

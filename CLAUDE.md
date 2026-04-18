@@ -20,7 +20,7 @@
 - P0 完成：项目骨架、依赖、API keys
 - P1 完成：polygon_client、eodhd_client、market_env_client、tiingo_client（内部用Polygon）
 - P2 完成：fundamental_filter（329只）、technical_filter（52-60只）
-- P3 完成：ep_detector、vcp_scorer（含低吸策略）、bull_flag_detector、weinstein_detector、bottom_finder_detector、post_ep_tight_detector、cup_handle_detector、mean_reversion_detector、signal_generator
+- P3 完成：ep_detector、vcp_scorer（含低吸策略）、bull_flag_detector、weinstein_detector、bottom_finder_detector、post_ep_tight_detector、cup_handle_detector、mean_reversion_detector、falling_wedge_detector、signal_generator
 - P4 完成：discord_alert、report_formatter（含WATCH信号）、log_writer
 - P5 完成：main.py 主调度器（并发Claude分析）
 - P6 完成：即时 EP 扫描器（polygon_snapshot.py + realtime_ep_scanner.py + main_realtime.py）
@@ -30,7 +30,8 @@
 
 ## 扫描漏斗
 全市场11000+只 → Polygon量价初筛（~2800只）→ FMP/Finviz基本面精筛（~329只）→ 技术面确认（52-60只）→ 信号引擎 → Discord推送
-Bottom Finder / Mean Reversion 并行路径：基本面候选（~329只）→ bottom_finder_detector / mean_reversion_detector（跳过技术面）
+Bottom Finder / Mean Reversion / Falling Wedge 并行路径：基本面候选（~329只）→ 各自detector（跳过技术面）
+  Falling Wedge 额外预筛：距52W High≥15%（股价在下跌才可能有楔形）
 Post-EP Tight / Cup Handle 使用 tech_candidates（同 EP/VCP）
 
 ## 筛选参数
@@ -40,7 +41,7 @@ Post-EP Tight / Cup Handle 使用 tech_candidates（同 EP/VCP）
 - Stage2：收盘价 > MA20 且 > MA50
 - technical_score >= 35
 
-## 八种信号形态
+## 九种信号形态
 1. EP（Episodic Pivot）：催化剂驱动跳空，缺口>5%，放量，收阳线
 2. VCP（Volatility Contraction Pattern）：三段波动递减，量缩后突破
    - 含低吸策略（VCP_CHEAT_ENTRY）：止损>10%时计算低吸买入区，评估可行性
@@ -58,6 +59,11 @@ Post-EP Tight / Cup Handle 使用 tech_candidates（同 EP/VCP）
 8. Mean Reversion（mean_reversion_detector）：优质股超跌均值回归，RSI<30+BB下轨+MA50偏离>15%
    - 使用 fund_candidates，需≥2个超卖信号 + ≥1个反弹信号（锤子/吞没/RSI背离）
    - entry=当前价, stop=近5日低点×0.97, target=MA50；R/R≥1.5
+9. Falling Wedge（falling_wedge_detector）：下降楔形突破，统计胜率约80%
+   - 下跌中形成 Lower Highs + Lower Lows 收斂楔形（40–120天），放量突破上方趋势线
+   - 使用 fund_candidates（距52W High≥15%预筛），线性回归拟合趋势线，RSI背离加分
+   - entry=阻力线延伸值, stop=最近SwingLow×0.98, target=entry+楔形入口高度（measured move）
+   - 评分系统：楔形天数+Swing对数+R²拟合度+量缩+突破量能+RSI背离（0–100分）
 
 ## 信号类型
 - BUY：大盘正常，直接买入
