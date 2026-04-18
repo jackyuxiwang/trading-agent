@@ -461,6 +461,25 @@ def run_daily_scan(date: str = None) -> dict:
     except Exception as e:
         print(f"  [warn] Telegram 推送失败: {e}")
 
+    # ── 圖表生成（可選） ─────────────────────────────────────────────────────
+    CHART_ENABLED = True
+    if CHART_ENABLED and all_signals:
+        try:
+            from output.chart_generator import generate_signal_chart, cleanup_old_charts
+            from output.discord_alert import send_signal_with_chart
+            cleanup_old_charts(days=1)
+            chart_sigs = [s for s in all_signals
+                          if str(s.get("action", "")).upper() in ("BUY", "BUY_RISKY", "WATCH")]
+            print(f"  [chart] 生成 {len(chart_sigs)} 張信號圖表…")
+            for sig in chart_sigs:
+                try:
+                    chart_path = generate_signal_chart(sig)
+                    send_signal_with_chart(sig, chart_path)
+                except Exception as ce:
+                    print(f"  [chart] {sig.get('ticker')} 圖表失敗: {ce}")
+        except Exception as e:
+            print(f"  [warn] 圖表模組異常: {e}")
+
     _done(t0, "输出")
 
     # ── 最终摘要 ──────────────────────────────────────────────────────────────

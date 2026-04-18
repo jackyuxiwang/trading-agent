@@ -216,6 +216,21 @@ def run_scan_once(
 
     if not test_mode:
         send_report(msg)
+        # 開盤 BUY 信號附帶圖表
+        if phase == "opening":
+            try:
+                from output.chart_generator import generate_signal_chart
+                from output.discord_alert import send_signal_with_chart
+                buy_sigs = [s for s in new_signals
+                            if s.get("action") in ("BUY", "BUY_RISKY")]
+                for sig in buy_sigs:
+                    try:
+                        chart_path = generate_signal_chart(sig)
+                        send_signal_with_chart(sig, chart_path)
+                    except Exception as ce:
+                        print(f"  [chart] {sig.get('ticker')} 圖表失敗: {ce}")
+            except Exception as e:
+                print(f"  [warn] 圖表模組異常: {e}")
 
     # 記錄已推送
     for s in new_signals:

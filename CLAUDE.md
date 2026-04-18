@@ -24,6 +24,7 @@
 - P4 完成：discord_alert、report_formatter（含WATCH信号）、log_writer
 - P5 完成：main.py 主调度器（并发Claude分析）
 - P6 完成：即时 EP 扫描器（polygon_snapshot.py + realtime_ep_scanner.py + main_realtime.py）
+- P7 完成：chart_generator（matplotlib 深色主題圖表 + Discord 圖片推送）
 - Portfolio 完成：position_sizer、virtual_account、trade_logger、weekly_report
 - 部署完成：run_daily.sh + cron（HKT 5:30 AM 周一至周五）+ pmset 自动唤醒（5:25 AM）
 - 待完成：Livermore Pivotal Point
@@ -100,6 +101,16 @@ Post-EP Tight / Cup Handle 使用 tech_candidates（同 EP/VCP）
   * 开盘 9:30–10:30 ET：scan_opening()，跳空 ≥ 5%，BUY/WATCH/FADE 分类
   * 信号去重：in-memory sent_tickers，每交易日重置
   * 用法：python main_realtime.py --test | --once | (持续模式)
+- 圖表模組（chart_generator.py）：
+  * matplotlib Agg（無頭服務器渲染），深色主題 #0d1117，1200×700px
+  * OHLC 蠟燭 + MA20（橙）+ MA50（藍）+ 成交量子圖
+  * Entry（綠虛線）/ Stop（紅虛線）/ Target（藍dash-dot），右側價格標籤
+  * 信號疊加：FALLING_WEDGE 趨勢線 | EP 缺口帶 | VCP/BullFlag 基部區 | MeanReversion BB
+  * FALLING_WEDGE 趨勢線需信號 dict 含 h_slope/h_intercept/l_slope/l_intercept/peak_bar_from_end
+  * main.py CHART_ENABLED=True：收盤後為所有 BUY+WATCH 信號生成並推送圖表
+  * main_realtime.py：開盤 BUY 信號自動附帶圖表推送
+  * send_signal_with_chart(signal, chart_path)：multipart/form-data 上傳到 Discord
+  * 圖表緩存在 output/charts/，每日自動清理（cleanup_old_charts(days=1)）
 
 ## API Keys（在 .env 文件中）
 ANTHROPIC_API_KEY, POLYGON_API_KEY, EODHD_API_KEY, FMP_API_KEY,

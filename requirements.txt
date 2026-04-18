@@ -7,3 +7,5 @@ anthropic
 schedule
 python-telegram-bot
 finvizfinance
+matplotlib
+mplfinance

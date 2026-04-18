@@ -135,6 +135,73 @@ def send_signal_alert(signal: dict) -> bool:
     return ok
 
 
+def send_signal_with_chart(signal: dict, chart_path: str) -> bool:
+    """
+    以 multipart/form-data 方式上傳圖表圖片到 Discord，附帶簡短信號摘要。
+
+    Args:
+        signal:     信號 dict（含 ticker, signal_type, action, entry_price 等）
+        chart_path: 本地 PNG 文件路徑
+
+    Returns:
+        True 表示發送成功
+    """
+    try:
+        webhook_url = _get_webhook_url()
+    except EnvironmentError as e:
+        print(f"[discord] 配置错误，跳过发送: {e}")
+        return False
+
+    import json
+    ticker      = signal.get("ticker", "")
+    signal_type = signal.get("signal_type", "")
+    action      = signal.get("action", "")
+    entry       = signal.get("entry_price") or signal.get("entry_zone", "N/A")
+    stop        = signal.get("stop_loss", "N/A")
+    target      = signal.get("target_price", "N/A")
+    rr          = signal.get("risk_reward", "")
+    score       = signal.get("score", "")
+
+    parts = [f"📊 **{ticker}** {signal_type} [{action}]"]
+    if entry and entry != "N/A":
+        try:
+            parts.append(f"Entry {float(entry):.2f}")
+        except Exception:
+            parts.append(f"Entry {entry}")
+    if stop and stop != "N/A":
+        try:
+            parts.append(f"Stop {float(stop):.2f}")
+        except Exception:
+            pass
+    if target and target != "N/A":
+        try:
+            parts.append(f"Target {float(target):.2f}")
+        except Exception:
+            pass
+    if rr:
+        parts.append(f"R/R {rr}")
+    if score:
+        parts.append(f"Score {score}/100")
+    caption = "   |   ".join(parts)
+
+    try:
+        with open(chart_path, "rb") as f:
+            resp = requests.post(
+                webhook_url,
+                data={"payload_json": json.dumps({"content": caption})},
+                files={"file": (f"{ticker}_chart.png", f, "image/png")},
+                timeout=20,
+            )
+        if resp.status_code in (200, 204):
+            print(f"  [discord] 圖表已發送: {ticker}")
+            return True
+        print(f"  [discord] 圖表發送失敗: HTTP {resp.status_code} — {resp.text[:120]}")
+        return False
+    except Exception as e:
+        print(f"  [discord] 圖表發送異常: {e}")
+        return False
+
+
 def test_connection() -> bool:
     """
     发送测试消息，验证 Webhook 配置是否正确。

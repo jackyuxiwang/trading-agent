@@ -286,7 +286,9 @@ def _find_falling_wedge(df: pd.DataFrame) -> Optional[dict]:
         "swing_high_count":   len(swing_highs),
         "swing_low_count":    len(swing_lows),
         "h_slope":            round(h_slope, 4),
+        "h_intercept":        round(h_intercept, 4),
         "l_slope":            round(l_slope, 4),
+        "l_intercept":        round(l_intercept, 4),
         "h_r2":               round(h_r2, 3),
         "l_r2":               round(l_r2, 3),
         "vol_ratio":          round(vol_ratio, 3),
@@ -303,6 +305,8 @@ def _find_falling_wedge(df: pd.DataFrame) -> Optional[dict]:
         "rsi_divergence":     rsi_divergence,
         "swing_high_first":   round(swing_highs[0][1], 2),
         "swing_low_last":     round(swing_lows[-1][1], 2),
+        # 圖表繪製所需：趨勢線坐標系（x=0 對應 peak bar）
+        "peak_bar_from_end":  look_back - peak_idx,
     }
 
 
@@ -456,6 +460,12 @@ def detect(candidates: list, date: Optional[str] = None) -> list:
             "dist_to_resistance": metrics["dist_to_resistance"],
             "rsi_divergence":     metrics["rsi_divergence"],
             "resistance_today":   metrics["resistance_today"],
+            # 圖表趨勢線參數（x_wsub = chart_bar - peak_bar，兩線在此坐標系下成立）
+            "h_slope":            metrics["h_slope"],
+            "h_intercept":        metrics["h_intercept"],
+            "l_slope":            metrics["l_slope"],
+            "l_intercept":        metrics["l_intercept"],
+            "peak_bar_from_end":  metrics["peak_bar_from_end"],
         }
         signals.append(signal)
 
