@@ -84,6 +84,18 @@ def _load_fund_cache_tickers() -> list:
         return []
 
 
+import re as _re
+_WARRANT_RE = _re.compile(r'^[A-Z]{3,}(WS|W|U)$')
+
+def _is_primary_ticker(ticker: str) -> bool:
+    """
+    返回 False 表示應排除的衍生品 ticker（權證 W/WS、Units U）。
+    例：CRMLW → False，CRMU → False，GLW → True（只有 3 個字母，不含後綴）。
+    規則：ticker 需要有 ≥3 個基礎字母 + 後綴 W / WS / U 才視為衍生品。
+    """
+    return not bool(_WARRANT_RE.match(ticker))
+
+
 def _close_position(open_p: float, high: float, low: float, close: float) -> Optional[float]:
     """計算收盤在當日振幅中的相對位置（0 = 最低，1 = 最高）。"""
     rng = high - low
@@ -100,7 +112,10 @@ def _classify_action(gap_pct: float, vol_ratio: Optional[float],
     BUY   — 跳空強、放量、收盤強
     WATCH — 跳空不足或量比偏低或收盤偏弱
     FADE  — 收盤顯著低於開盤（假突破）
+    SKIP  — 負向跳空（gap down），EP 只做多，直接排除
     """
+    if gap_pct <= 0:
+        return "SKIP"
     if gap_pct < MIN_OPENING_GAP_PCT:
         return "WATCH"
 
@@ -161,10 +176,12 @@ def _build_signal(snap: dict, vol_ma: Optional[float] = None,
     market_status = snap.get("market_status", "")
     action = _classify_action(gap_pct, vol_ratio, close_pos, market_status)
 
-    # ── Fibonacci 入場分析 ────────────────────────────────────────────────────
+    # ── Fibonacci 入場分析（僅 gap up 有意義）────────────────────────────────
     # 盤前用當前價作為缺口高點；開盤後用實際開盤價
+    # gap down 時 pm_high <= prev_close，calculate_fib_entry 內部會返回 None
     pm_high = open_p if (phase == "opening" and open_p > prev_close) else price
-    fib = calculate_fib_entry(prev_close, pm_high, current_price=price) if prev_close > 0 else None
+    fib = (calculate_fib_entry(prev_close, pm_high, current_price=price)
+           if prev_close > 0 and pm_high > prev_close else None)
 
     return {
         "ticker":         ticker,
@@ -247,11 +264,14 @@ def scan_premarket(
         change_pct = snap.get("change_pct", 0.0)
 
         # 優先用盤前漲幅，若為 0 則用日漲幅（gainers 場景）
-        effective_pct = pre_pct if abs(pre_pct) >= 1.0 else change_pct
+        # 只取正值：EP 只做多，gap down 直接跳過
+        effective_pct = pre_pct if pre_pct >= 1.0 else change_pct
 
+        if not _is_primary_ticker(ticker):     # 排除權證(W/WS)、Units(U)
+            continue
         if price < MIN_PRICE:
             continue
-        if abs(effective_pct) < min_change_pct:
+        if effective_pct < min_change_pct:   # 負值或不足門檻均排除
             continue
 
         # 記錄來源（可能同時屬於多個來源）
@@ -266,8 +286,8 @@ def scan_premarket(
         sig["source"]  = source_log[ticker]
         signals.append(sig)
 
-    # 按漲幅降序
-    signals.sort(key=lambda s: abs(s["gap_pct"]), reverse=True)
+    # 按漲幅降序（gap_pct 已全為正值，無需 abs）
+    signals.sort(key=lambda s: s["gap_pct"], reverse=True)
 
     # 來源分佈統計
     from_gainers = sum(1 for s in signals if "gainers" in s.get("source", ""))
@@ -318,21 +338,24 @@ def scan_opening(
         open_p     = snap.get("open", 0.0)
         volume     = snap.get("volume", 0)
 
+        if not _is_primary_ticker(ticker):     # 排除權證(W/WS)、Units(U)
+            continue
         if price < MIN_PRICE or prev_close <= 0 or open_p <= 0:
             continue
 
         gap_pct = (open_p - prev_close) / prev_close * 100
 
-        if abs(gap_pct) < min_gap_pct:
+        # EP 只做多：只保留正向跳空，負值（gap down）直接跳過
+        if gap_pct < min_gap_pct:
             continue
 
         vol_ma  = (vol_ma_map or {}).get(ticker)
         sig = _build_signal(snap, vol_ma=vol_ma, phase="opening")
         signals.append(sig)
 
-    # BUY 優先，FADE 排後
+    # BUY 優先，FADE 排後；gap_pct 已全為正值
     order = {"BUY": 0, "WATCH": 1, "FADE": 2}
-    signals.sort(key=lambda s: (order.get(s["action"], 9), -abs(s["gap_pct"])))
+    signals.sort(key=lambda s: (order.get(s["action"], 9), -s["gap_pct"]))
 
     buy_cnt   = sum(1 for s in signals if s["action"] == "BUY")
     watch_cnt = sum(1 for s in signals if s["action"] == "WATCH")

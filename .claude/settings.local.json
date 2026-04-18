@@ -38,7 +38,8 @@
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(python -c \"from signals.bottom_finder_detector import detect; print\\(''✅ import OK''\\)\")",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(__NEW_LINE_48a4c709b2d8151b__ rm:*)"
     ]
   }
 }

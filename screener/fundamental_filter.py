@@ -9,10 +9,12 @@ fundamental_filter.py — 两步走基本面筛选模块
 第二步（FMP Screener，Finviz 备用）: 基本面精筛
   主路径：FMP company-screener 一次批量请求，取与 Stage1 的交集
   备用路径：逐只查询 finvizfinance.quote（并发5线程）
-  - EPS Q/Q > 10%
-  - Sales Q/Q > 10%
-  - Gross Margin > 20%
-  - Market Cap 5亿–500亿美元
+
+  條件邏輯（優先順序）：
+  A. 高成長豁免：Sales Q/Q > 100%  → 直接通過（無視 EPS 和 GM）
+  B. 成長門檻：EPS Q/Q > 10%  OR  Sales Q/Q > 25%
+  C. 毛利率：Gross Margin > 15%（Sales > 50% 時可豁免 GM 缺失或偏低）
+  D. 市值：5億–5000億美元（500B，涵蓋 GLW/LITE/COHR 等大型光通信龍頭）
 """
 
 import json
@@ -39,16 +41,20 @@ from data.polygon_client import get_grouped_daily
 CACHE_DIR = Path(__file__).parent.parent / "data" / "cache"
 
 # ── 第一步：量价初筛阈值 ───────────────────────────────────────────────────────
-STAGE1_MIN_VOLUME     = 500_000
-STAGE1_MIN_CLOSE      = 5.0
-STAGE1_CLOSE_OPEN_RATIO = 0.5   # close > open * 此值，排除腰斩异常数据
+STAGE1_MIN_VOLUME     = 800_000   # 原 500K，提高流動性門檻
+STAGE1_MIN_CLOSE      = 8.0       # 原 $5，剔除低價垃圾股
+STAGE1_CLOSE_OPEN_RATIO = 0.5     # close > open * 此值，排除腰斩异常数据
 
 # ── 第二步：基本面精筛阈值 ────────────────────────────────────────────────────
-STAGE2_MIN_EPS_GROWTH   = 10.0  # %
-STAGE2_MIN_SALES_GROWTH = 10.0  # %
-STAGE2_MIN_GROSS_MARGIN = 20.0  # %
-STAGE2_MIN_MARKET_CAP   = 500_000_000       # 5亿
-STAGE2_MAX_MARKET_CAP   = 50_000_000_000    # 500亿
+STAGE2_MIN_EPS_GROWTH      = 10.0   # EPS Q/Q > 10%（與 Sales 條件二選一）
+STAGE2_MIN_SALES_GROWTH    = 25.0   # Sales Q/Q > 25%（與 EPS 條件二選一）
+STAGE2_MIN_GROSS_MARGIN    = 15.0   # GM > 15%（已放寬，原 20%）
+STAGE2_MIN_MARKET_CAP      = 1_000_000_000       # 10億（原 5億，剔除低流動性小票）
+STAGE2_MAX_MARKET_CAP      = 500_000_000_000    # 5000億（涵蓋 GLW/LITE/COHR 等大型龍頭）
+STAGE2_GM_EXEMPT_SALES     = 50.0   # Sales Q/Q > 50% 時 GM 低/缺失可豁免
+STAGE2_HIGH_GROWTH_EXEMPT  = 100.0  # Sales Q/Q > 100% 直接通過（不檢查 EPS 和 GM）
+# FMP 廣篩門檻（寬鬆，避免漏掉 EPS 為負但高成長的公司；實際業務邏輯在 _passes_stage2）
+_FMP_MIN_SALES_PREFILTER   = 5.0    # %，FMP 查詢層最低門檻（僅縮小宇宙，不做精篩）
 
 STAGE2_WORKERS          = 5     # Finviz 并发线程数（备用路径，不超过5）
 STAGE2_JITTER_MIN       = 0.8   # Finviz 随机延迟下限（秒）
@@ -80,6 +86,18 @@ def _save_cache(name: str, data: list) -> None:
 
 
 # ── 字段解析工具 ──────────────────────────────────────────────────────────────
+
+def _parse_float(val) -> Optional[float]:
+    """解析純數字字符串（如股價 '185.45'）→ float；無法解析返回 None。"""
+    if val is None or val in ("-", "", "N/A"):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    try:
+        return float(str(val).strip().replace(",", ""))
+    except ValueError:
+        return None
+
 
 def _parse_pct(val) -> Optional[float]:
     """'98.89%' 或 '-5.2%' → float；无法解析返回 None。"""
@@ -225,10 +243,11 @@ def _fetch_fmp_screener() -> Optional[list]:
         print("  [warn] FMP_API_KEY 未设置，跳过 FMP screener")
         return None
 
+    # FMP 廣篩：只用寬鬆門檻縮小宇宙，精確業務邏輯（EPS OR Sales、GM 豁免等）
+    # 在 _passes_stage2() 做後置過濾。
+    # 不在 FMP 層設 EPS 門檻，否則 EPS 為負但高成長的公司（LITE/RKLB/FLY）會被漏掉。
     params = {
-        "revenueGrowthQuarterlyGreaterThan": STAGE2_MIN_SALES_GROWTH / 100,
-        "epsGrowthQuarterlyGreaterThan":     STAGE2_MIN_EPS_GROWTH   / 100,
-        "grossProfitMarginGreaterThan":      STAGE2_MIN_GROSS_MARGIN / 100,
+        "revenueGrowthQuarterlyGreaterThan": _FMP_MIN_SALES_PREFILTER / 100,  # 5% 廣篩
         "marketCapMoreThan":                 STAGE2_MIN_MARKET_CAP,
         "marketCapLowerThan":                STAGE2_MAX_MARKET_CAP,
         "isActivelyTrading":                 "true",
@@ -287,6 +306,9 @@ def _fetch_fmp_screener() -> Optional[list]:
             "market_cap_raw":   _format_market_cap(mc),
             "float_shares":     None,
             "float_short":      None,
+            # FMP screener 不返回 52W 數據；main.py 預篩時會當作「無數據→保留」
+            "52w_high":         None,
+            "52w_low":          None,
             # price/volume 后续由 Polygon poly_map 覆盖；此处保留 FMP 值作兜底
             "price":            item.get("price"),
             "volume":           item.get("volume"),
@@ -316,10 +338,12 @@ def _fetch_fundamentals(ticker: str) -> Optional[dict]:
             print(f"  [warn] {ticker}: 被限速/封禁，跳过 ({e})")
         return None
 
-    eps   = _parse_pct(info.get("EPS Q/Q"))
-    sales = _parse_pct(info.get("Sales Q/Q"))
-    gm    = _parse_pct(info.get("Gross Margin"))
-    mc    = _parse_market_cap(info.get("Market Cap"))
+    eps      = _parse_pct(info.get("EPS Q/Q"))
+    sales    = _parse_pct(info.get("Sales Q/Q"))
+    gm       = _parse_pct(info.get("Gross Margin"))
+    mc       = _parse_market_cap(info.get("Market Cap"))
+    high_52w = _parse_float(info.get("52W High"))
+    low_52w  = _parse_float(info.get("52W Low"))
 
     return {
         "ticker":           ticker,
@@ -333,24 +357,50 @@ def _fetch_fundamentals(ticker: str) -> Optional[dict]:
         "market_cap_raw":   _format_market_cap(mc),
         "float_shares":     info.get("Shs Float"),
         "float_short":      _parse_pct(info.get("Short Float")),
+        "52w_high":         high_52w,
+        "52w_low":          low_52w,
     }
 
 
 def _passes_stage2(data: dict) -> bool:
-    """检查是否通过第二步基本面过滤条件。"""
-    eps   = data.get("eps_growth_qoq")
-    sales = data.get("sales_growth_qoq")
-    gm    = data.get("gross_margin")
-    mc    = data.get("market_cap")
+    """
+    檢查是否通過第二步基本面條件。
 
-    if eps   is None or eps   <= STAGE2_MIN_EPS_GROWTH:
+    條件優先順序：
+    A. 高成長豁免：Sales > 100%  → 直接通過
+    B. EPS > 10%  OR  Sales > 25%
+    C. GM > 15%（Sales > 50% 時低 GM / 缺 GM 可豁免）
+    D. 市值 5億–5000億
+    """
+    eps   = data.get("eps_growth_qoq")   # %
+    sales = data.get("sales_growth_qoq") # %
+    gm    = data.get("gross_margin")     # %
+    mc    = data.get("market_cap")       # 原始數值
+
+    # D. 市值門檻（必須）
+    if mc is None or not (STAGE2_MIN_MARKET_CAP <= mc <= STAGE2_MAX_MARKET_CAP):
         return False
-    if sales is None or sales <= STAGE2_MIN_SALES_GROWTH:
+
+    # A. 高成長豁免：Sales Q/Q > 100%，直接通過（無視 EPS 和 GM）
+    if sales is not None and sales > STAGE2_HIGH_GROWTH_EXEMPT:
+        return True
+
+    # B. EPS > 10%  OR  Sales > 25%
+    eps_ok   = eps   is not None and eps   > STAGE2_MIN_EPS_GROWTH
+    sales_ok = sales is not None and sales > STAGE2_MIN_SALES_GROWTH
+    if not (eps_ok or sales_ok):
         return False
-    if gm    is None or gm    <= STAGE2_MIN_GROSS_MARGIN:
-        return False
-    if mc    is None or not (STAGE2_MIN_MARKET_CAP <= mc <= STAGE2_MAX_MARKET_CAP):
-        return False
+
+    # C. 毛利率：Sales > 50% 時豁免低 GM 或缺失
+    high_rev = sales is not None and sales > STAGE2_GM_EXEMPT_SALES
+    if gm is not None:
+        if gm <= STAGE2_MIN_GROSS_MARGIN and not high_rev:
+            return False
+    else:
+        # GM 缺失：僅在高收入成長時豁免
+        if not high_rev:
+            return False
+
     return True
 
 
@@ -391,10 +441,15 @@ def run_stage2(tickers: list, polygon_date: Optional[str] = None) -> list:
     fmp_results = _fetch_fmp_screener()
 
     if fmp_results:
-        # 取与 Stage1 量价初筛的交集
+        # 取與 Stage1 量价初筛的交集，再套用 _passes_stage2() 做精確業務過濾
+        # （FMP 廣篩已放寬，精確條件在此執行：EPS OR Sales、GM 豁免、高成長豁免）
+        fmp_stage1_count = 0
         for stock in fmp_results:
             ticker = stock["ticker"]
             if ticker not in stage1_set:
+                continue
+            fmp_stage1_count += 1
+            if not _passes_stage2(stock):
                 continue
             # 用 Polygon 数据覆盖价格/成交量（更实时）
             poly_info = poly_map.get(ticker, {})
@@ -408,15 +463,18 @@ def run_stage2(tickers: list, polygon_date: Optional[str] = None) -> list:
         elapsed = time.time() - t_start
         passed.sort(key=lambda x: x.get("volume") or 0, reverse=True)
         print(f"[stage2] FMP 完成：Stage1={len(stage1_set)} 只，"
-              f"FMP符合基本面={len(fmp_results)} 只，"
-              f"交集={len(passed)} 只，耗时 {elapsed:.1f}s")
+              f"FMP廣篩={len(fmp_results)} 只，"
+              f"Stage1交集={fmp_stage1_count} 只，"
+              f"精篩通過={len(passed)} 只，耗时 {elapsed:.1f}s")
         _save_cache(cache_key, passed)
         return passed
 
     # ── 备用路径：Finviz 并发逐只查询 ────────────────────────────────────────
     print(f"[stage2] FMP 不可用，切换 Finviz fallback（{len(tickers):,} 只，并发 {STAGE2_WORKERS} 线程）…")
-    print(f"  条件: EPS Q/Q>{STAGE2_MIN_EPS_GROWTH}% | Sales Q/Q>{STAGE2_MIN_SALES_GROWTH}% | "
-          f"GM>{STAGE2_MIN_GROSS_MARGIN}% | MarketCap 0.5B–50B")
+    print(f"  條件: (EPS>{STAGE2_MIN_EPS_GROWTH}% OR Sales>{STAGE2_MIN_SALES_GROWTH}%) | "
+          f"GM>{STAGE2_MIN_GROSS_MARGIN}%（Sales>{STAGE2_GM_EXEMPT_SALES}%可豁免）| "
+          f"Sales>{STAGE2_HIGH_GROWTH_EXEMPT}%直接通過 | "
+          f"MarketCap 0.5B–{STAGE2_MAX_MARKET_CAP/1e9:.0f}B")
 
     total   = len(tickers)
     skipped = 0

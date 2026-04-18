@@ -232,14 +232,59 @@ def run_daily_scan(date: str = None) -> dict:
         _write_summary(summary, [], market_env)
         return summary
 
-    # ── Step 4.5: 歷史數據預載（共享快取，避免各 detector 重複拉取）────────────
-    t0 = _step("Step 4.5: 歷史數據預載")
-    all_preload_tickers = []
+    # ── Step 4.5: 歷史數據預載（52W 預篩 + 共享快取）────────────────────────────
+    t0 = _step("Step 4.5: 歷史數據預載（智能預篩）")
+
+    # 判斷閾值
+    DIST_BOTTOM_MIN = 25.0   # 離 52W High ≥ 25% → 底部/超跌候選（BottomFinder + MeanReversion）
+    DIST_CUP_MAX    = 20.0   # 離 52W High ≤ 20% → 接近前高候選（CupHandle）
+
+    tech_set = {s.get("ticker") or s.get("T", "") for s in tech_candidates}
+
+    preload_set: set = set(tech_set)  # tech_candidates 一律預載
+
+    skip_cnt = bottom_pool_cnt = cup_pool_cnt = nodata_cnt = 0
+
     for s in fund_candidates:
-        t = s.get("ticker") or s.get("T", "")
-        if t:
-            all_preload_tickers.append(t)
-    preload_stats = _preload_history(all_preload_tickers, end_date=date)
+        ticker  = s.get("ticker") or s.get("T", "")
+        if not ticker or ticker in tech_set:
+            continue  # tech_candidates 已加入，跳過重複
+
+        price    = s.get("price")
+        high_52w = s.get("52w_high")
+
+        # 52W 數據缺失（FMP 路徑或 Finviz 未返回）→ 保守地保留，避免漏掉
+        if not high_52w or not price or price <= 0:
+            preload_set.add(ticker)
+            nodata_cnt += 1
+            continue
+
+        dist_pct = (high_52w - price) / high_52w * 100  # 距 52W High 的跌幅（%）
+
+        if dist_pct >= DIST_BOTTOM_MIN:
+            # 股價遠低於 52W High → 可能是底部反轉或超跌均值回歸
+            preload_set.add(ticker)
+            bottom_pool_cnt += 1
+        elif dist_pct <= DIST_CUP_MAX:
+            # 股價接近 52W High → 可能正在形成杯柄
+            preload_set.add(ticker)
+            cup_pool_cnt += 1
+        else:
+            # 中間位置（20-25% 區間）→ 不適合底部類也不適合杯柄類，跳過
+            skip_cnt += 1
+
+    total_fund_non_tech = len(fund_candidates) - sum(
+        1 for s in fund_candidates
+        if (s.get("ticker") or s.get("T", "")) in tech_set
+    )
+    print(f"  fund_candidates 非tech部分：{total_fund_non_tech} 只")
+    print(f"  52W預篩結果：底部池 {bottom_pool_cnt} + 杯柄池 {cup_pool_cnt} "
+          f"+ 無數據保留 {nodata_cnt} + 跳過 {skip_cnt}")
+    print(f"  Tech candidates：{len(tech_set)} 只（無條件預載）")
+    print(f"  預載總計：{len(preload_set)} 只（原 {len(fund_candidates)} 只，"
+          f"節省 {len(fund_candidates) - len(preload_set)} 只 API calls）")
+
+    preload_stats = _preload_history(list(preload_set), end_date=date)
     _done(t0, f"預載（拉取 {preload_stats['fetched']} / 快取 {preload_stats['cached']} / 失敗 {preload_stats['failed']}）")
 
     # ── Step 5: 信号检测 ──────────────────────────────────────────────────────
